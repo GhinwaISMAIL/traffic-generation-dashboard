@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "twindash"
+version = "0.1.0"
+description = "Integration layer between the MGEN traffic-gen pipeline and the POWDER testbed"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas",
+    "pyarrow",
+    "pyyaml",
+    "streamlit",
+]
+
+[project.scripts]
+twindash = "twindash.cli:main"
+
+[tool.setuptools]
+packages = ["twindash"]

@@ -1,0 +1,5 @@
+cn5g_ssh_host: ghinwa@cn5g-docker-host.<experiment>.emulab.net
+physical_ues:
+  - {name: nuc1, ssh_host: ghinwa@ota-nuc1-cots-ue.<experiment>.emulab.net}
+  - {name: nuc2, ssh_host: ghinwa@ota-nuc2-cots-ue.<experiment>.emulab.net}
+  - {name: nuc3, ssh_host: ghinwa@ota-nuc3-cots-ue.<experiment>.emulab.net}
