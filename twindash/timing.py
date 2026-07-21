@@ -71,9 +71,12 @@ def to_utc(sod, midnight_epoch_s, ref_sod=None):
 
 
 def zones_agree(timing: dict) -> bool:
-    """True when every node's local midnight is the same instant. Cross-node
-    latency (DL sender on the core, receiver on a cell) is only meaningful
-    when this holds."""
+    """Whether all nodes use the same civil-time zone.
+
+    Different values are not a clock-synchronization failure: the per-node
+    anchors still convert every timestamp to UTC correctly.  This is retained
+    only as a diagnostic for human-readable wall-clock displays.
+    """
     vals = [midnight_epoch(timing, n) for n in (timing.get("nodes") or {})]
     vals = [v for v in vals if v is not None]
     return len(set(vals)) <= 1

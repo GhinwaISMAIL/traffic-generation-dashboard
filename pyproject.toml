@@ -12,7 +12,12 @@ dependencies = [
     "pyarrow",
     "pyyaml",
     "streamlit",
+    "plotly",
 ]
+
+[project.optional-dependencies]
+export = ["kaleido"]
+dev = ["pytest"]
 
 [project.scripts]
 twindash = "twindash.cli:main"

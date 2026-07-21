@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-from twindash import kpis, bursts
+from twindash import bursts, kpis, prb, timing
 
 INK       = "#3D5A6C"   # text, axes
 DL        = "#8BA9C9"   # downlink
@@ -70,16 +70,45 @@ def _loss_fig(obs):
 
 
 def _latency_fig(obs):
-    g = (obs.dropna(subset=["latency_ms_mean"])
-            .groupby(["ue", "direction"])["latency_ms_mean"].median().reset_index())
+    metric = "latency_ms_median" if "latency_ms_median" in obs else "latency_ms_mean"
+    g = (obs.dropna(subset=[metric])
+            .groupby(["ue", "direction"])[metric].median().reset_index())
     ues = sorted(g["ue"].unique())
     fig = go.Figure()
     for d, col in (("dl", DL), ("ul", UL)):
         sub = g[g.direction == d].set_index("ue").reindex(ues)
-        fig.add_bar(name=d.upper(), x=ues, y=sub["latency_ms_mean"].values,
+        fig.add_bar(name=d.upper(), x=ues, y=sub[metric].values,
                     marker_color=col,
                     hovertemplate="%{x} "+d.upper()+": %{y:.0f} ms<extra></extra>")
-    return _layout(fig, "Median latency by UE", "ms", height=300)
+    return _layout(fig, "Median flow latency by UE", "ms", height=300)
+
+
+def _prb_fig(data, selected):
+    fig = go.Figure()
+    chosen = data[data["ue"].isin(selected)]
+    for ue in selected:
+        rows = chosen[chosen["ue"] == ue]
+        for direction, dash in (("dl", "solid"), ("ul", "dot")):
+            fig.add_scatter(
+                name=f"{ue} {direction.upper()}", x=rows["t_s"],
+                y=rows[f"{direction}_prb"], mode="lines",
+                line=dict(dash=dash),
+                hovertemplate="t=%{x:.0f}s %{y:.0f} PRB<extra>" + ue + " "
+                              + direction.upper() + "</extra>")
+    return _layout(fig, "PRB consumed during the xApp window", "PRB / s", height=360)
+
+
+def _efficiency_fig(data, selected):
+    fig = go.Figure()
+    chosen = data[data["ue"].isin(selected)]
+    for (ue, direction), rows in chosen.groupby(["ue", "direction"]):
+        fig.add_scatter(
+            name=f"{ue} {direction.upper()}", x=rows["t_s"],
+            y=rows["bits_per_prb"], mode="lines",
+            line=dict(dash="solid" if direction == "dl" else "dot"),
+            hovertemplate="t=%{x:.0f}s %{y:.0f} bits/PRB<extra>"
+                          + str(ue) + " " + direction.upper() + "</extra>")
+    return _layout(fig, "Application-layer efficiency", "bits / PRB", height=360)
 
 
 def _designed_vs_realized_fig(obs, designed):
@@ -144,17 +173,56 @@ def render(run_dir):
         st.plotly_chart(_loss_fig(obs), use_container_width=True)
     with b:
         st.plotly_chart(_latency_fig(obs), use_container_width=True)
-    st.caption("Latency uses UE/DN wall clocks; the shape is reliable, absolute "
-               "values depend on clock sync.")
+    st.caption("Latency is converted to UTC with per-node run anchors. Absolute "
+               "values still depend on the POWDER nodes being clock-synchronized.")
 
     st.markdown("#### Designed vs realized")
     dvr_fig = _designed_vs_realized_fig(obs, designed)
     st.plotly_chart(dvr_fig, use_container_width=True)
 
+    extra_figs = {}
+    try:
+        prb_data = prb.prb_timeseries(run_dir)
+    except (OSError, ValueError, pd.errors.ParserError) as exc:
+        st.warning(f"PRB data could not be loaded: {exc}")
+        prb_data = pd.DataFrame()
+    if not prb_data.empty:
+        st.markdown("#### Radio resources")
+        mapped = int(prb_data.get("mapped", prb_data["ue"].notna()).sum())
+        st.caption(
+            f"Mapped PRB rows: {mapped}/{len(prb_data)}; "
+            f"counter-reset boundaries dropped: {prb_data.attrs.get('epoch_boundaries', 0)}.")
+        available = sorted(prb_data["ue"].dropna().astype(str).unique())
+        defaults = available[:min(4, len(available))]
+        selected = st.multiselect("UEs shown in radio charts", available,
+                                  default=defaults, key="radio_ues")
+        if selected:
+            prb_fig = _prb_fig(prb_data, selected)
+            st.plotly_chart(prb_fig, use_container_width=True)
+            extra_figs["prb_timeseries"] = prb_fig
+
+            efficiency = prb.efficiency(run_dir)
+            if efficiency.empty:
+                reason = efficiency.attrs.get(
+                    "error", "No overlapping MGEN and xApp UTC seconds were found.")
+                st.warning(f"Efficiency unavailable: {reason}")
+            else:
+                eff_fig = _efficiency_fig(efficiency, selected)
+                st.plotly_chart(eff_fig, use_container_width=True)
+                extra_figs["bits_per_prb"] = eff_fig
+
+        tm = timing.load(run_dir)
+        window = timing.xapp_window(tm) if tm else None
+        if window:
+            st.caption(
+                f"xApp UTC window: {window[0]:.3f}–{window[1]:.3f}; "
+                "MGEN and PRB were joined on absolute epoch seconds and UE.")
+
     st.markdown("#### Export figures")
     figs = {"throughput_dl": tp_dl, "throughput_ul": tp_ul,
             "loss": _loss_fig(obs), "latency": _latency_fig(obs),
             "designed_vs_realized": dvr_fig}
+    figs.update(extra_figs)
     cols = st.columns(len(figs))
     for (name, fig), col in zip(figs.items(), cols):
         try:

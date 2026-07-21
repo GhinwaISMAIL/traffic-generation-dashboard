@@ -47,7 +47,7 @@ def _as_int(v):
 
 
 def parse_log(path, midnight_epoch=None, ref_sod=None,
-              sent_midnight_epoch=None) -> pd.DataFrame:
+              sent_midnight_epoch=None, sent_ref_sod=None) -> pd.DataFrame:
     """SEND/RECV events from one MGEN log.
 
     midnight_epoch      epoch second of local midnight on the node that wrote
@@ -60,6 +60,8 @@ def parse_log(path, midnight_epoch=None, ref_sod=None,
     """
     if sent_midnight_epoch is None:
         sent_midnight_epoch = midnight_epoch
+    if sent_ref_sod is None:
+        sent_ref_sod = ref_sod
     rows = []
     for line in Path(path).open():
         parts = line.split()
@@ -84,9 +86,27 @@ def parse_log(path, midnight_epoch=None, ref_sod=None,
             "dst_ip": dst_ip, "dst_port": dst_port,
             "size": _as_int(rec.get("size")),
             "sent_time": sent,
-            "sent_utc_time": _timing.to_utc(sent, sent_midnight_epoch, ref_sod),
+            "sent_utc_time": _timing.to_utc(
+                sent, sent_midnight_epoch, sent_ref_sod),
         })
     return pd.DataFrame(rows)
+
+
+def elapsed_seconds(start_sod, end_sod):
+    """Elapsed seconds between wall-clock stamps, including midnight rollover.
+
+    This is only the fallback when a run has no absolute clock anchors.  Small
+    negative values are deliberately preserved because they expose clock skew;
+    only an unmistakable day boundary is corrected.
+    """
+    if start_sod is None or end_sod is None:
+        return None
+    delta = end_sod - start_sod
+    if delta < -43200.0:
+        delta += 86400.0
+    elif delta > 43200.0:
+        delta -= 86400.0
+    return delta
 
 
 def parse_run_name(filename):

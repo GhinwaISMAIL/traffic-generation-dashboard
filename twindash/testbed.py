@@ -11,13 +11,13 @@ from pathlib import Path
 
 import yaml
 
-from . import schema, settings
+from . import ric5g, schema, settings
 
 
 def load_testbed_config(path=None):
     if path is None:
         path = settings.repo_root() / "testbed_config.yaml"
-    return yaml.safe_load(Path(path).read_text())
+    return yaml.safe_load(Path(path).read_text()) or {}
 
 
 def _run(cmd):
@@ -40,7 +40,15 @@ def fetch_logs(run_name, run_dir, cfg):
     Handles RFsim (single node, logs in containers) and COTS (NUC files)."""
     logs = Path(run_dir) / schema.LOGS_DIR
     logs.mkdir(exist_ok=True)
-    if cfg.get("testbed") == "powder_rfsim_docker":
+    if ric5g.is_config(cfg):
+        # The distributed runner already streams every remote artifact into the
+        # local run folder.  Treat this action as a contract check instead of
+        # repeating 50+ SSH/SCP operations with stale container assumptions.
+        missing = ric5g.missing_logs(run_dir, cfg)
+        if missing:
+            raise FileNotFoundError(
+                "distributed run is incomplete; missing logs: " + ", ".join(missing))
+    elif cfg.get("testbed") == "powder_rfsim_docker":
         _fetch_logs_rfsim(run_dir, logs, cfg)
     else:
         _fetch_logs_cots(run_name, logs, cfg)
@@ -86,3 +94,10 @@ def run_script(path):
     one safe way to trigger testbed work from the CLI: the script stays the
     single, validated source of truth for the run sequence."""
     return _run(["bash", str(path)])
+
+
+def run_experiment(run_dir, cfg):
+    """Dispatch to the topology-specific, validated execution path."""
+    if ric5g.is_config(cfg):
+        return ric5g.run(run_dir, cfg)
+    return run_script(Path(run_dir) / "deployment" / "dn_commands.sh")

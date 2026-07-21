@@ -1,0 +1,75 @@
+import json
+
+from twindash import ric5g, testbed_cfg
+
+
+def config(n_ue=24):
+    return testbed_cfg.build_ric5g(
+        username="ghinwa", n_ue=n_ue,
+        core_host="pc798.emulab.net",
+        cell_hosts=["pc05-fort.emulab.net", "pc11-fort.emulab.net"],
+        flags={"allow_placeholder_hosts": False})
+
+
+def test_global_ue_names_map_to_cell_local_containers():
+    cfg = config()
+    boxes = cfg["ues"]["boxes"]
+    assert boxes["ue1"]["container"] == "ric5g-ue-cell1-1"
+    assert boxes["ue12"]["container"] == "ric5g-ue-cell1-12"
+    assert boxes["ue13"]["container"] == "ric5g-ue-cell2-1"
+    assert boxes["ue24"]["container"] == "ric5g-ue-cell2-12"
+    assert cfg["xapp"]["expected_subscriptions"] == 8
+    assert testbed_cfg.validate(cfg, allow_placeholder=False) == []
+
+
+def test_capacity_error_is_reported():
+    errors = testbed_cfg.validate(config(25), allow_placeholder=False)
+    assert any("exceed" in error for error in errors)
+
+
+def test_runner_environment_comes_from_config():
+    cfg = config()
+    env = ric5g.environment(cfg)
+    assert env["CORE_HOST"] == "ghinwa@pc798.emulab.net"
+    assert env["CELL1_HOST"] == "ghinwa@pc05-fort.emulab.net"
+    assert env["CELL2_HOST"] == "ghinwa@pc11-fort.emulab.net"
+    assert env["NB_ID_START"] == "3584"
+    assert env["XAPP_SUBS"] == "8"
+
+
+def test_nested_duration_is_supported(tmp_path):
+    run = tmp_path / "run_nested"
+    run.mkdir()
+    (run / "config.json").write_text(json.dumps({"simulation": {"duration": 321}}))
+    assert ric5g.duration_s(run) == 321
+
+
+def test_local_contract_rejects_mismatched_ue_scripts(tmp_path):
+    run = tmp_path / "run_bad_scripts"
+    scripts = run / "mgen_scripts"
+    scripts.mkdir(parents=True)
+    for name in ("dn_dl_tx.mgn", "dn_ul_rx.mgn", "flow_batch_map.csv",
+                 "ue1_ul_tx.mgn", "ue2_dl_rx.mgn"):
+        (scripts / name).write_text("")
+
+    cfg = config(n_ue=2)
+    cfg["runner"]["script"] = __file__
+    errors = ric5g.validate_local(run, cfg)
+    assert any("sender/receiver scripts do not match" in error
+               for error in errors)
+
+
+def test_local_contract_rejects_xapp_window_after_traffic(tmp_path):
+    run = tmp_path / "run_short"
+    scripts = run / "mgen_scripts"
+    scripts.mkdir(parents=True)
+    (run / "config.json").write_text(json.dumps({"simulation_duration": 60}))
+    for name in ("dn_dl_tx.mgn", "dn_ul_rx.mgn", "flow_batch_map.csv",
+                 "ue1_ul_tx.mgn", "ue1_dl_rx.mgn"):
+        (scripts / name).write_text("")
+
+    cfg = config(n_ue=1)
+    cfg["runner"]["script"] = __file__
+    cfg["xapp"].update({"delay_s": 45, "window_s": 30})
+    errors = ric5g.validate_local(run, cfg)
+    assert any("after the 60s traffic run" in error for error in errors)

@@ -18,8 +18,9 @@ import streamlit as st
 import yaml
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from twindash import runs, kpis, testbed, settings, bursts, realized, scenario, testbed_cfg  # noqa: E402
-import results_view  # noqa: E402
+from twindash import (bursts, kpis, realized, ric5g, runs, scenario, settings,
+                      testbed, testbed_cfg)  # noqa: E402
+from dashboard import results_view  # noqa: E402
 
 PROFILES = settings.profiles_dir()
 
@@ -37,15 +38,38 @@ if page == "Results":
     run = st.sidebar.selectbox("Run", [r.name for r in found])
     run_dir = Path(PROFILES) / run
 
-    c1, c2 = st.columns(2)
-    if c1.button("Fetch logs from testbed"):
-        with st.spinner("Copying logs back…"):
-            testbed.fetch_logs(run, run_dir, testbed.load_testbed_config())
+    try:
+        active_testbed = testbed.load_testbed_config()
+    except (FileNotFoundError, TypeError, yaml.YAMLError):
+        active_testbed = {}
+    distributed = ric5g.is_config(active_testbed)
+
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Run distributed experiment", disabled=not distributed,
+                 help="Uses deploy_ric5g.sh and the hosts on the Testbed page"):
+        try:
+            with st.spinner("Running MGEN and the xApp on POWDER…"):
+                testbed.run_experiment(run_dir, active_testbed)
+                kpis.save_observed(run_dir)
+            st.success("Experiment completed and KPIs were rebuilt.")
+        except Exception as exc:
+            st.error(f"Experiment failed: {exc}")
+    fetch_label = "Verify collected logs" if distributed else "Fetch logs from testbed"
+    if c2.button(fetch_label):
+        try:
+            with st.spinner("Checking artifacts…" if distributed else
+                            "Copying logs back…"):
+                testbed.fetch_logs(run, run_dir, active_testbed)
+                kpis.save_observed(run_dir)
+            st.success("Artifacts verified and observed KPIs rebuilt.")
+        except Exception as exc:
+            st.error(f"Artifact verification failed: {exc}")
+    if c3.button("Rebuild KPIs from existing logs"):
+        try:
             kpis.save_observed(run_dir)
-        st.success("Fetched and rebuilt observed KPIs.")
-    if c2.button("Rebuild KPIs from existing logs"):
-        kpis.save_observed(run_dir)
-        st.success("Rebuilt.")
+            st.success("Rebuilt.")
+        except Exception as exc:
+            st.error(f"KPI rebuild failed: {exc}")
 
     results_view.render(run_dir)
 
@@ -211,64 +235,33 @@ elif page == "Design":
 else:  # Testbed
     st.title("Testbed configuration")
     st.caption(f"Writes {settings.repo_root() / 'testbed_config.yaml'} (gitignored). "
-               "For RFsim the UE boxes and ue_name_map are generated from the "
-               "experiment name and UE count. UE IPs are placeholders — resolved "
-               "live at deploy. Previous file backed up to .bak.")
+               "UE boxes and ue_name_map are generated from the scenario UE count. "
+               "UE IPs are resolved live at deploy. Previous file is backed up to .bak.")
 
     existing = testbed_cfg.load()
-    kind_default = "cots" if existing.get("testbed") == "powder_emulab" else "rfsim"
+    kind_for_testbed = {
+        "powder_ric5g_distributed": "ric5g",
+        "powder_rfsim_docker": "rfsim",
+        "powder_emulab": "cots",
+    }
+    kind_default = kind_for_testbed.get(existing.get("testbed"), "ric5g")
+    labels = {
+        "ric5g": "RIC5G distributed (core + 2 cells)",
+        "rfsim": "RFsim (Docker, single node)",
+        "cots": "COTS (physical UEs)",
+    }
+    choices = list(labels)
     kind_label = st.selectbox(
-        "Testbed type",
-        ["RFsim (Docker, single node)", "COTS (physical UEs)"],
-        index=0 if kind_default == "rfsim" else 1)
-    kind = "rfsim" if kind_label.startswith("RFsim") else "cots"
+        "Testbed type", [labels[k] for k in choices],
+        index=choices.index(kind_default))
+    kind = next(k for k, label in labels.items() if label == kind_label)
     t = testbed_cfg.TEMPLATES[kind]
 
-    # selected type matches the existing file's type? only then prefill from it
     same_kind = existing.get("testbed") == t["testbed"]
     cur_user = (existing.get("ues") or {}).get("username", "ghinwa")
-    cur_exp = testbed_cfg.guess_experiment(existing)
-    # selected type matches the existing file's type? only then prefill from it
-    same_kind = existing.get("testbed") == t["testbed"]
-    cur_user = (existing.get("ues") or {}).get("username", "ghinwa")
-    cur_exp = testbed_cfg.guess_experiment(existing) if same_kind else ""
-    cur_host = testbed_cfg.guess_host(existing) if same_kind else ""
-    scen_n_ue = scenario.merged()["simulation"]["n_ue"]
-
-    c = st.columns(2)
-    if kind == "rfsim":
-        host = c[0].text_input(
-            "Node SSH host (FQDN)", cur_host,
-            help="The pcXXX.emulab.net node from your POWDER experiment — it "
-                 "changes each time you instantiate, e.g. pc712.emulab.net").strip()
-        experiment = None
-    else:
-        experiment = c[0].text_input("Emulab experiment name", cur_exp,
-                                     help="Replaces <experiment> in every FQDN").strip()
-        host = None
-    username = c[1].text_input("SSH username", cur_user).strip()
-    n_ue = int(scen_n_ue)
+    n_ue = int(scenario.merged()["simulation"]["n_ue"])
     st.info(f"Generating {n_ue} UEs to match scenario_config.yaml. The UE count is "
             "set on the Design page — this follows it automatically.")
-
-    # defaults follow the SELECTED type; prefill from the file only if it's the same type
-    dn = (existing.get("dn") or {}) if same_kind else {}
-    ex_boxes = (existing.get("ues") or {}).get("boxes", {}) if same_kind else {}
-    first_box = next(iter(ex_boxes.values()), {})
-    ue_mgen_default = ((existing.get("ues") or {}).get("mgen_dir") if same_kind else None) \
-        or testbed_cfg.default_ue_mgen_dir(kind, username)
-    with st.expander("Advanced (containers, interface, paths)"):
-        dn_container = st.text_input("DN container", dn.get("container", t["dn_container"]),
-                                     key=f"dnc_{kind}")
-        ue_interface = st.text_input("UE interface", first_box.get("interface", t["ue_interface"]),
-                                     key=f"uei_{kind}")
-        dn_mgen_dir = st.text_input("DN mgen dir", dn.get("mgen_dir", t["dn_mgen_dir"]),
-                                    key=f"dnm_{kind}")
-        ue_mgen_dir = st.text_input("UE mgen dir", ue_mgen_default, key=f"uem_{kind}")
-        ue_container_tpl = None
-        if t["has_container"]:
-            ue_container_tpl = st.text_input("UE container pattern ({n} = index)",
-                                             t["ue_container_tpl"], key=f"uec_{kind}")
 
     fc = st.columns(2)
     allow_ph = fc[0].checkbox("allow_placeholder_hosts",
@@ -276,16 +269,91 @@ else:  # Testbed
     allow_inv = fc[1].checkbox("allow_invalid_run",
                                value=(existing.get("flags") or {}).get("allow_invalid_run", False))
 
-    existing_ips = {b: v.get("ip") for b, v in ex_boxes.items()
-                    if v.get("ip") and v.get("ip") != testbed_cfg.IP_PLACEHOLDER}
+    if kind == "ric5g":
+        hosts = testbed_cfg.ric5g_hosts(existing) if same_kind else {}
+        username = st.text_input("SSH username", cur_user).strip()
+        hc = st.columns(3)
+        core_host = hc[0].text_input("Core host", hosts.get("core", ""),
+                                     placeholder="pcXXX.emulab.net").strip()
+        cell1_host = hc[1].text_input("Cell 1 host", hosts.get("cell1", ""),
+                                      placeholder="pcXX-site.emulab.net").strip()
+        cell2_host = hc[2].text_input("Cell 2 host", hosts.get("cell2", ""),
+                                      placeholder="pcXX-site.emulab.net").strip()
+        old_xapp = (existing.get("xapp") or {}) if same_kind else {}
+        old_ues = (existing.get("ues") or {}) if same_kind else {}
+        old_dn = (existing.get("dn") or {}) if same_kind else {}
+        old_mgen = (existing.get("mgen") or {}) if same_kind else {}
+        old_runner = (existing.get("runner") or {}) if same_kind else {}
+        with st.expander("Advanced distributed settings"):
+            ac = st.columns(3)
+            ues_per_cell = ac[0].number_input(
+                "UEs per cell", 1, 32, int(old_ues.get("ues_per_cell", 12)))
+            xapp_enabled = ac[1].checkbox(
+                "Collect PRB with xApp", value=old_xapp.get("enabled", True))
+            xapp_delay = ac[2].number_input(
+                "xApp delay (s)", 0, 7200, int(old_xapp.get("delay_s", 270)))
+            xapp_window = st.number_input(
+                "xApp collection window (s)", 1, 3600,
+                int(old_xapp.get("window_s", 60)))
+            dn_container = st.text_input(
+                "DN container", old_dn.get("container", t["dn_container"]))
+            ue_container_tpl = st.text_input(
+                "UE container pattern", t["ue_container_tpl"],
+                help="Available fields: {cell}, {ue}, and global {n}")
+            remote_bin = st.text_input(
+                "Remote helper directory", old_mgen.get("remote_bin", t["remote_bin"]))
+            runner = st.text_input(
+                "Local runner", old_runner.get("script", t["runner"]))
 
-    cfg = testbed_cfg.build(
-        kind, username=username, n_ue=n_ue, host=host, experiment=experiment,
-        dn_container=dn_container, ue_interface=ue_interface,
-        dn_mgen_dir=dn_mgen_dir, ue_mgen_dir=ue_mgen_dir,
-        ue_container_tpl=ue_container_tpl,
-        flags={"allow_placeholder_hosts": allow_ph, "allow_invalid_run": allow_inv},
-        existing_ips=existing_ips)
+        cfg = testbed_cfg.build_ric5g(
+            username=username, n_ue=n_ue, core_host=core_host,
+            cell_hosts=[cell1_host, cell2_host], ues_per_cell=int(ues_per_cell),
+            dn_container=dn_container, ue_container_tpl=ue_container_tpl,
+            remote_bin=remote_bin, runner=runner, xapp_enabled=xapp_enabled,
+            xapp_delay_s=int(xapp_delay), xapp_window_s=int(xapp_window),
+            flags={"allow_placeholder_hosts": allow_ph,
+                   "allow_invalid_run": allow_inv})
+    else:
+        cur_exp = testbed_cfg.guess_experiment(existing) if same_kind else ""
+        cur_host = testbed_cfg.guess_host(existing) if same_kind else ""
+        c = st.columns(2)
+        if kind == "rfsim":
+            host = c[0].text_input("Node SSH host (FQDN)", cur_host).strip()
+            experiment = None
+        else:
+            experiment = c[0].text_input("Emulab experiment name", cur_exp).strip()
+            host = None
+        username = c[1].text_input("SSH username", cur_user).strip()
+        dn = (existing.get("dn") or {}) if same_kind else {}
+        ex_boxes = (existing.get("ues") or {}).get("boxes", {}) if same_kind else {}
+        first_box = next(iter(ex_boxes.values()), {})
+        ue_mgen_default = ((existing.get("ues") or {}).get("mgen_dir")
+                           if same_kind else None) or \
+            testbed_cfg.default_ue_mgen_dir(kind, username)
+        with st.expander("Advanced (containers, interface, paths)"):
+            dn_container = st.text_input(
+                "DN container", dn.get("container", t["dn_container"]), key=f"dnc_{kind}")
+            ue_interface = st.text_input(
+                "UE interface", first_box.get("interface", t["ue_interface"]),
+                key=f"uei_{kind}")
+            dn_mgen_dir = st.text_input(
+                "DN mgen dir", dn.get("mgen_dir", t["dn_mgen_dir"]), key=f"dnm_{kind}")
+            ue_mgen_dir = st.text_input(
+                "UE mgen dir", ue_mgen_default, key=f"uem_{kind}")
+            ue_container_tpl = None
+            if t["has_container"]:
+                ue_container_tpl = st.text_input(
+                    "UE container pattern ({n} = index)", t["ue_container_tpl"],
+                    key=f"uec_{kind}")
+        existing_ips = {b: v.get("ip") for b, v in ex_boxes.items()
+                        if v.get("ip") and v.get("ip") != testbed_cfg.IP_PLACEHOLDER}
+        cfg = testbed_cfg.build(
+            kind, username=username, n_ue=n_ue, host=host, experiment=experiment,
+            dn_container=dn_container, ue_interface=ue_interface,
+            dn_mgen_dir=dn_mgen_dir, ue_mgen_dir=ue_mgen_dir,
+            ue_container_tpl=ue_container_tpl,
+            flags={"allow_placeholder_hosts": allow_ph,
+                   "allow_invalid_run": allow_inv}, existing_ips=existing_ips)
 
     errs = testbed_cfg.validate(cfg, allow_ph)
     with st.expander("Preview testbed_config.yaml"):

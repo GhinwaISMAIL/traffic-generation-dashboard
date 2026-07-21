@@ -27,7 +27,18 @@ def load_rnti_map(run_dir) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=["ue", "cell", "nb_id", "rnti"])
     m = pd.read_csv(path)
-    return m[["ue", "cell", "nb_id", "rnti"]]
+    required = ["ue", "cell", "nb_id", "rnti"]
+    missing = [c for c in required if c not in m]
+    if missing:
+        raise ValueError(f"rnti_map.csv is missing columns: {missing}")
+    out = m[required].dropna().copy()
+    out[["cell", "nb_id", "rnti"]] = out[["cell", "nb_id", "rnti"]].astype(int)
+    duplicate = out.duplicated(["nb_id", "rnti"], keep=False)
+    if duplicate.any():
+        conflicts = out.loc[duplicate].sort_values(["nb_id", "rnti", "ue"])
+        raise ValueError("one (nb_id, rnti) maps to multiple rows:\n"
+                         + conflicts.to_string(index=False))
+    return out
 
 
 def prb_timeseries(run_dir) -> pd.DataFrame:
@@ -49,12 +60,14 @@ def prb_timeseries(run_dir) -> pd.DataFrame:
 
     m = load_rnti_map(run_dir)
     if not m.empty:
-        df = df.merge(m, on=["nb_id", "rnti"], how="left")
+        df = df.merge(m, on=["nb_id", "rnti"], how="left", validate="many_to_one")
+        df["mapped"] = df["ue"].notna()
     else:
         df["ue"] = df["rnti"].astype(str)
+        df["mapped"] = False
 
     df["t_s"] = df["utc_second"] - df["utc_second"].min()
-    keep = ["utc_second", "t_s", "ue", "cell", "nb_id", "rnti",
+    keep = ["utc_second", "t_s", "ue", "mapped", "cell", "nb_id", "rnti",
             "dl_prb", "ul_prb", "samples"]
     keep += [c for c in df.columns if c.endswith("_avg")]
     out = df[[c for c in keep if c in df.columns]].reset_index(drop=True)
@@ -85,6 +98,9 @@ def efficiency(run_dir, window_s: float = 1.0) -> pd.DataFrame:
     wrong numbers. If the MGEN side has no absolute time — logs/run_timing.json
     missing — this returns empty rather than guessing.
     """
+    if float(window_s) != 1.0:
+        raise ValueError("PRB is aggregated per second; efficiency currently requires window_s=1")
+
     prb = prb_timeseries(run_dir)
     if prb.empty:
         return pd.DataFrame()
@@ -99,14 +115,13 @@ def efficiency(run_dir, window_s: float = 1.0) -> pd.DataFrame:
                               "aligned to traffic")
         return out
 
-    tp = (tp.groupby(["utc_second", "ue"])["mbps"].sum().reset_index())
-    j = tp.merge(prb[["utc_second", "ue", "dl_prb", "ul_prb"]],
-                 on=["utc_second", "ue"], how="inner")
-    total_prb = j["dl_prb"] + j["ul_prb"]
-    j["bits_per_prb"] = (j["mbps"] * 1e6 * window_s) / total_prb.replace(0, pd.NA)
+    tp = (tp.groupby(["utc_second", "ue", "direction"])["mbps"]
+            .sum().reset_index())
+    resource = prb[["utc_second", "ue", "dl_prb", "ul_prb"]].melt(
+        id_vars=["utc_second", "ue"], var_name="direction", value_name="prb")
+    resource["direction"] = resource["direction"].str.removesuffix("_prb")
+    j = tp.merge(resource, on=["utc_second", "ue", "direction"], how="inner")
+    j["bits_per_prb"] = (
+        j["mbps"] * 1e6 * window_s) / j["prb"].replace(0, pd.NA)
     j["t_s"] = j["utc_second"] - j["utc_second"].min()
-    tm = timing.load(run_dir)
-    if tm and not timing.zones_agree(tm):
-        j.attrs["warning"] = ("node local midnights disagree — check time zones "
-                              "before trusting cross-node latency")
     return j

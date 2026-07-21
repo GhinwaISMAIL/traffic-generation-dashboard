@@ -11,7 +11,7 @@ A calibration sweep is then just a shell loop:
 import argparse
 from pathlib import Path
 
-from . import runs, kpis, testbed, schema, settings
+from . import runs, kpis, ric5g, testbed, schema, settings
 
 
 def _profiles():
@@ -42,7 +42,18 @@ def cmd_kpis(args):
 
 
 def cmd_deploy(args):
-    testbed.run_script(_dir(args.run) / "deployment" / "dn_commands.sh")
+    cfg = testbed.load_testbed_config()
+    print("deployment log:", testbed.run_experiment(_dir(args.run), cfg))
+
+
+def cmd_preflight(args):
+    cfg = testbed.load_testbed_config()
+    if not ric5g.is_config(cfg):
+        raise SystemExit("preflight currently applies to powder_ric5g_distributed")
+    errors = ric5g.validate_local(_dir(args.run), cfg)
+    if errors:
+        raise SystemExit("preflight failed:\n- " + "\n- ".join(errors))
+    print("local preflight passed")
 
 
 def main():
@@ -52,7 +63,8 @@ def main():
     p = sub.add_parser("list"); p.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_list)
 
-    for name, fn in (("fetch", cmd_fetch), ("kpis", cmd_kpis), ("deploy", cmd_deploy)):
+    for name, fn in (("fetch", cmd_fetch), ("kpis", cmd_kpis),
+                     ("preflight", cmd_preflight), ("deploy", cmd_deploy)):
         p = sub.add_parser(name); p.add_argument("run"); p.set_defaults(func=fn)
 
     args = ap.parse_args()

@@ -21,6 +21,8 @@ Bytes are UDP payload (app layer) => effectively goodput (no TCP retransmit).
 They exclude 5G/GTP-U/RLC/MAC overhead, so throughput-per-PRB is app-layer bits
 per resource block — a meaningful efficiency proxy, not raw spectral efficiency.
 """
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
@@ -31,8 +33,14 @@ from . import schema, mgen_log, mgen_script, timing
 
 def _flow_map(run_dir: Path) -> pd.DataFrame:
     fbm = pd.read_csv(run_dir / schema.SCRIPTS_DIR / "flow_batch_map.csv")
-    return (fbm.rename(columns={"unique_flow_id": "flow_id", "ue_name": "ue"})
-               [["flow_id", "ue", "app", "direction"]])
+    out = (fbm.rename(columns={"unique_flow_id": "flow_id", "ue_name": "ue"})
+              [["flow_id", "ue", "app", "direction"]])
+    duplicate = out.duplicated(["flow_id", "direction"], keep=False)
+    if duplicate.any():
+        values = out.loc[duplicate, ["flow_id", "direction"]].drop_duplicates()
+        raise ValueError("flow_batch_map.csv has non-unique flow/direction keys: "
+                         + values.to_dict("records").__repr__())
+    return out
 
 
 def run_duration(run_dir: Path, observed_span: float | None = None) -> float | None:
@@ -52,8 +60,12 @@ def run_duration(run_dir: Path, observed_span: float | None = None) -> float | N
 def _load_events(run_dir: Path):
     logs = run_dir / schema.LOGS_DIR
     tm = timing.load(run_dir)
+    fbm = _flow_map(run_dir)
+    flow_to_ue = {(int(r.flow_id), r.direction): r.ue
+                  for r in fbm.itertuples(index=False)}
     sent_frames, recv_frames = [], []
-    for log in sorted(logs.glob("*.log")):
+    event_logs = sorted(logs.glob("*_tx.log")) + sorted(logs.glob("*_rx.log"))
+    for log in event_logs:
         node_tag, direction = mgen_log.parse_run_name(log.name)
         node = timing.node_of(tm, node_tag)
         df = mgen_log.parse_log(
@@ -63,6 +75,20 @@ def _load_events(run_dir: Path):
         if df.empty:
             continue
         df["direction"] = direction
+        df["clock_node"] = node
+        if log.name.endswith("_rx.log") and tm:
+            # The event stamp is written by the receiver, while MGEN's sent>
+            # stamp originated on the sender.  UL receive logs on the DN can
+            # contain UEs from both cells, so the sender anchor is per row.
+            def sender_utc(row):
+                ue = flow_to_ue.get((int(row["flow_id"]), direction)) \
+                    if pd.notna(row.get("flow_id")) else None
+                sender = "core" if direction == "dl" else timing.node_of(tm, ue)
+                return timing.to_utc(
+                    row.get("sent_time"), timing.midnight_epoch(tm, sender),
+                    timing.anchor_sod(tm, sender))
+
+            df["sent_utc_time"] = df.apply(sender_utc, axis=1)
         if log.name.endswith("_tx.log"):
             sent_frames.append(df[df.event == "SEND"])
         elif log.name.endswith("_rx.log"):
@@ -78,10 +104,14 @@ def build_observed(run_dir) -> pd.DataFrame:
     fbm = _flow_map(run_dir)
     strays = 0
 
-    # whole-run observed span (fallback duration) from all recv timestamps
+    # Whole-run observed span (fallback duration).  Prefer absolute time because
+    # receive logs are written on three different nodes.
     span = None
     if not recv.empty:
-        span = recv["time"].max() - recv["time"].min()
+        absolute = recv.get("utc_time", pd.Series(dtype=float)).dropna()
+        clock = absolute if not absolute.empty else recv["time"].dropna()
+        if not clock.empty:
+            span = clock.max() - clock.min()
     dur = run_duration(run_dir, observed_span=span) or 1.0
 
     if not sent.empty:
@@ -93,7 +123,14 @@ def build_observed(run_dir) -> pd.DataFrame:
         s = pd.DataFrame(columns=["flow_id","direction","ue","app","sent_packets","sent_bytes"])
 
     if not recv.empty:
-        recv["latency_ms"] = (recv["time"] - recv["sent_time"]) * 1000.0
+        fallback = recv.apply(
+            lambda row: mgen_log.elapsed_seconds(row.get("sent_time"),
+                                                 row.get("time")), axis=1)
+        recv["latency_ms"] = fallback * 1000.0
+        anchored = recv["utc_time"].notna() & recv["sent_utc_time"].notna()
+        recv.loc[anchored, "latency_ms"] = (
+            recv.loc[anchored, "utc_time"] -
+            recv.loc[anchored, "sent_utc_time"]) * 1000.0
         recv = recv.merge(fbm, on=["flow_id", "direction"], how="left")
         strays = int(recv["ue"].isna().sum())
         recv = recv.dropna(subset=["ue"])
@@ -101,6 +138,7 @@ def build_observed(run_dir) -> pd.DataFrame:
                  .agg(recv_packets=("seq", "count"),
                       recv_bytes=("size", "sum"),
                       latency_ms_mean=("latency_ms", "mean"),
+                      latency_ms_median=("latency_ms", "median"),
                       latency_ms_p95=("latency_ms", lambda x: x.quantile(0.95)),
                       jitter_ms=("latency_ms", "std"))
                  .reset_index())
@@ -108,8 +146,8 @@ def build_observed(run_dir) -> pd.DataFrame:
         r["recv_mbps"] = (r["recv_bytes"] * 8) / dur / 1e6
     else:
         r = pd.DataFrame(columns=["flow_id","direction","ue","app","recv_packets",
-                                  "recv_bytes","latency_ms_mean","latency_ms_p95",
-                                  "jitter_ms","recv_mbps"])
+                                  "recv_bytes","latency_ms_mean","latency_ms_median",
+                                  "latency_ms_p95","jitter_ms","recv_mbps"])
 
     obs = r.merge(s, on=["flow_id", "direction", "ue", "app"], how="outer")
     obs["sent_packets"] = obs["sent_packets"].fillna(0).astype(int)
@@ -133,6 +171,7 @@ def by_ue(run_dir) -> pd.DataFrame:
                   recv_bytes=("recv_bytes", "sum"),
                   recv_mbps=("recv_mbps", "sum"),
                   latency_ms_mean=("latency_ms_mean", "mean"),
+                  latency_ms_median=("latency_ms_median", "median"),
                   latency_ms_p95=("latency_ms_p95", "max"))
              .reset_index())
     g["loss"] = 1 - g["recv_packets"] / g["sent_packets"].replace(0, pd.NA)
@@ -200,6 +239,10 @@ def save_observed(run_dir) -> Path:
 def build_designed(run_dir) -> pd.DataFrame:
     run_dir = Path(run_dir)
     scripts = run_dir / schema.SCRIPTS_DIR
+    flow_map = _flow_map(run_dir)
+    flow_app = {(int(r.flow_id), r.direction): r.app
+                for r in flow_map.itertuples(index=False)}
+    duration = run_duration(run_dir) or 1.0
     ip2ue, ue_class = {}, {}
     man = scripts / "manifest.csv"
     if man.exists():
@@ -213,13 +256,19 @@ def build_designed(run_dir) -> pd.DataFrame:
             ue = ip2ue.get(str(r["dst_ip"]), r["dst_ip"])
             rows.append({"run_id": run_dir.name, "ue": ue, "direction": "dl",
                          "ue_class": ue_class.get(ue), "flow_id": r["flow_id"],
-                         "proj_packets": r["proj_packets"], "proj_bytes": r["proj_bytes"]})
+                         "app": flow_app.get((r["flow_id"], "dl")),
+                         "proj_packets": r["proj_packets"], "proj_bytes": r["proj_bytes"],
+                         "proj_duration_s": duration,
+                         "proj_throughput_bps": r["proj_bytes"] * 8 / duration})
     for ul in sorted(scripts.glob("ue*_ul_tx.mgn")):
         ue = ul.name.split("_")[0]
         for r in mgen_script.projected_from_script(ul):
             rows.append({"run_id": run_dir.name, "ue": ue, "direction": "ul",
                          "ue_class": ue_class.get(ue), "flow_id": r["flow_id"],
-                         "proj_packets": r["proj_packets"], "proj_bytes": r["proj_bytes"]})
+                         "app": flow_app.get((r["flow_id"], "ul")),
+                         "proj_packets": r["proj_packets"], "proj_bytes": r["proj_bytes"],
+                         "proj_duration_s": duration,
+                         "proj_throughput_bps": r["proj_bytes"] * 8 / duration})
     return pd.DataFrame(rows)
 
 

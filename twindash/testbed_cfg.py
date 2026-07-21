@@ -2,9 +2,10 @@
 
 For RFsim the whole file (DN, per-UE boxes, ue_name_map) is generated from the
 experiment name + UE count + a few constants, so the dynamic, error-prone parts
-(the repeated FQDNs and container names) are produced, not hand-typed. UE IPs are
-written as placeholders — they're dynamic and resolved live at deploy. The
-previous file is backed up to testbed_config.yaml.bak first.
+(the repeated FQDNs and container names) are produced, not hand-typed.  The
+distributed RIC5G profile additionally maps global ``ueN`` names onto cell-local
+containers.  UE IPs are placeholders — they are dynamic and resolved live at
+deploy.  The previous file is backed up to testbed_config.yaml.bak first.
 """
 import re
 from datetime import datetime
@@ -16,6 +17,17 @@ from . import settings
 IP_PLACEHOLDER = "12.1.1.x"   # resolved live at deploy; never trusted as-is
 
 TEMPLATES = {
+    "ric5g": {
+        "testbed": "powder_ric5g_distributed",
+        "dn_container": "ric5g-oai-ext-dn",
+        "dn_mgen_dir": "/logs/mgen",
+        "ue_mgen_dir": "/logs/mgen",
+        "ue_interface": "oaitun_ue1",
+        "ue_container_tpl": "ric5g-ue-cell{cell}-{ue}",
+        "remote_bin": "/local/repository/bin",
+        "runner": "deploy_ric5g.sh",
+        "has_container": True,
+    },
     "rfsim": {
         "testbed": "powder_rfsim_docker",
         "dn_container": "rfsim5g-oai-ext-dn",
@@ -69,6 +81,112 @@ def default_ue_mgen_dir(kind, username) -> str:
     return f"/home/{username}/mgen_runs" if kind == "cots" else "/tmp/mgen_runs"
 
 
+def _ssh_host(username: str, host: str) -> str:
+    """Accept either a bare FQDN or an already-qualified user@host value."""
+    host = (host or "").strip()
+    return host if "@" in host else f"{username}@{host}"
+
+
+def ric5g_hosts(cfg) -> dict:
+    """Return the editable bare hosts from an existing distributed config."""
+    nodes = cfg.get("nodes") or {}
+
+    def bare(value):
+        value = value or ""
+        return value.split("@", 1)[1] if "@" in value else value
+
+    out = {"core": bare((nodes.get("core") or {}).get("ssh_host"))}
+    for cell in nodes.get("cells") or []:
+        out[f"cell{cell.get('cell')}"] = bare(cell.get("ssh_host"))
+    return out
+
+
+def build_ric5g(*, username, n_ue, core_host, cell_hosts,
+                ues_per_cell=12, nb_id_start=3584,
+                dn_container="ric5g-oai-ext-dn",
+                ue_container_tpl="ric5g-ue-cell{cell}-{ue}",
+                ue_interface="oaitun_ue1",
+                remote_bin="/local/repository/bin",
+                runner="deploy_ric5g.sh", xapp_enabled=True,
+                xapp_delay_s=270, xapp_window_s=60, flags=None):
+    """Build the configuration for the three-node RIC5G POWDER profile.
+
+    ``ue1..ueN`` remain the stable names used by generated MGEN scripts.  Each
+    entry records its cell and cell-local UE index so the orchestration layer
+    never has to infer that mapping from a hostname or an IP address.
+    """
+    flags = flags or {}
+    ues_per_cell = int(ues_per_cell)
+    cell_hosts = list(cell_hosts)
+    nodes = []
+    for index, host in enumerate(cell_hosts, start=1):
+        nodes.append({
+            "name": f"cell{index}",
+            "cell": index,
+            "ssh_host": _ssh_host(username, host),
+            "nb_id": int(nb_id_start) + index - 1,
+            "gnb_container": f"ric5g-gnb-cell{index}",
+        })
+
+    boxes, name_map = {}, {}
+    for global_index in range(1, int(n_ue) + 1):
+        cell = (global_index - 1) // ues_per_cell + 1
+        local_ue = (global_index - 1) % ues_per_cell + 1
+        host = cell_hosts[cell - 1] if cell <= len(cell_hosts) else ""
+        name = f"ue{global_index}"
+        boxes[name] = {
+            "ssh_host": _ssh_host(username, host),
+            "container": ue_container_tpl.format(cell=cell, ue=local_ue,
+                                                   n=global_index),
+            "cell": cell,
+            "ue_index": local_ue,
+            "nb_id": int(nb_id_start) + cell - 1,
+            "ip": IP_PLACEHOLDER,
+            "interface": ue_interface,
+        }
+        name_map[name] = name
+
+    return {
+        "schema_version": 2,
+        "testbed": TEMPLATES["ric5g"]["testbed"],
+        "nodes": {
+            "core": {"ssh_host": _ssh_host(username, core_host)},
+            "cells": nodes,
+        },
+        "dn": {
+            "container": dn_container,
+            "ssh_host": _ssh_host(username, core_host),
+            "ip": "192.168.72.135",
+            "mgen_dir": "/logs/mgen",
+        },
+        "ues": {
+            "username": username,
+            "ues_per_cell": ues_per_cell,
+            "mgen_dir": "/logs/mgen",
+            "boxes": boxes,
+        },
+        "ue_name_map": name_map,
+        "mgen": {
+            "remote_bin": remote_bin,
+            "ul_port": 5000,
+            "dl_port": 5001,
+        },
+        "ric": {
+            "e2_port": 36421,
+            "e42_port": 36422,
+            "expected_e2_nodes": len(cell_hosts),
+        },
+        "xapp": {
+            "enabled": bool(xapp_enabled),
+            "expected_subscriptions": 4 * len(cell_hosts),
+            "delay_s": int(xapp_delay_s),
+            "window_s": int(xapp_window_s),
+        },
+        "runner": {"script": runner},
+        "flags": flags,
+    }
+
+
 def build(kind, *, username, n_ue, host=None, experiment=None,
           dn_container, ue_interface, dn_mgen_dir, ue_mgen_dir,
           ue_container_tpl=None, flags, existing_ips=None):
@@ -106,13 +224,36 @@ def build(kind, *, username, n_ue, host=None, experiment=None,
 
 def validate(cfg, allow_placeholder) -> list:
     errs = []
-    host = cfg["dn"]["ssh_host"]
-    after = host.split("@", 1)[1] if "@" in host else host
-    if (not after) or ("<" in after):
+    if cfg.get("testbed") == TEMPLATES["ric5g"]["testbed"]:
+        nodes = cfg.get("nodes") or {}
+        named_hosts = [("core", (nodes.get("core") or {}).get("ssh_host"))]
+        named_hosts += [(f"cell{c.get('cell')}", c.get("ssh_host"))
+                        for c in nodes.get("cells") or []]
+        if len(named_hosts) < 3:
+            errs.append("RIC5G requires one core host and at least two cell hosts")
         if not allow_placeholder:
-            errs.append("SSH host not set — enter your node FQDN (e.g. pc712.emulab.net), "
-                        "or tick allow_placeholder_hosts to pre-stage")
-    if not cfg["ue_name_map"]:
+            for name, host in named_hosts:
+                after = (host or "").split("@", 1)[-1]
+                if not after or "<" in after:
+                    errs.append(f"{name} SSH host is not set")
+
+        boxes = (cfg.get("ues") or {}).get("boxes") or {}
+        capacity = len(nodes.get("cells") or []) * int(
+            (cfg.get("ues") or {}).get("ues_per_cell", 0))
+        if len(boxes) > capacity:
+            errs.append(f"{len(boxes)} UEs exceed the configured cell capacity ({capacity})")
+        nb_ids = [c.get("nb_id") for c in nodes.get("cells") or []]
+        if len(nb_ids) != len(set(nb_ids)):
+            errs.append("cell nb_id values must be unique")
+    else:
+        host = cfg["dn"]["ssh_host"]
+        after = host.split("@", 1)[1] if "@" in host else host
+        if (not after) or ("<" in after):
+            if not allow_placeholder:
+                errs.append("SSH host not set — enter your node FQDN "
+                            "(e.g. pc712.emulab.net), or tick "
+                            "allow_placeholder_hosts to pre-stage")
+    if not cfg.get("ue_name_map"):
         errs.append("no UEs — set n_ue on the Design page")
     return errs
 
