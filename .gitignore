@@ -1,8 +1,12 @@
 .venv/
 __pycache__/
 *.pyc
-*.egg-info/
-build/
-dist/
+*.bak
+*.bak_*
+dashboard_config.yaml
+.streamlit/secrets.toml
 .DS_Store
-testbed_config.yaml
+*.egg-info/
+apply_*.py
+patch_*.py
+twindash_kpi.py

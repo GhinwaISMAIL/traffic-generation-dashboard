@@ -1,0 +1,10 @@
+[theme]
+# thesis palette — applied app-wide (Results, Design, Testbed)
+primaryColor = "#3D5A6C"            # slate-teal: buttons, radio/slider selection, links
+backgroundColor = "#FFFFFF"         # white main area
+secondaryBackgroundColor = "#F4F6F8"  # soft slate-tint: sidebar, cards, inputs
+textColor = "#2A3A45"               # deep slate ink for body text
+font = "sans-serif"
+
+[theme.sidebar]
+backgroundColor = "#F4F6F8"

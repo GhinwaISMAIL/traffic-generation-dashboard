@@ -11,17 +11,19 @@ A calibration sweep is then just a shell loop:
 import argparse
 from pathlib import Path
 
-from . import runs, kpis, testbed, schema
+from . import runs, kpis, testbed, schema, settings
 
-PROFILES = "traffic_profiles"
+
+def _profiles():
+    return settings.profiles_dir()
 
 
 def _dir(name):
-    return Path(PROFILES) / name
+    return _profiles() / name
 
 
 def cmd_list(args):
-    for r in runs.list_runs(PROFILES):
+    for r in runs.list_runs(_profiles()):
         if args.quiet:
             print(r.name)
         else:

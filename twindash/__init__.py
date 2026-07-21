@@ -3,4 +3,4 @@
 Imported by both the notebooks (to write designed KPIs) and the dashboard
 (to read runs back). Nothing here knows about Jupyter or Streamlit.
 """
-from . import schema, mgen_log, kpis, runs, testbed  # noqa: F401
+from . import schema, mgen_log, mgen_script, kpis, runs, testbed, settings, bursts, realized, scenario, testbed_cfg  # noqa: F401

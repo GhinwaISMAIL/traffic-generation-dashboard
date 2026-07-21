@@ -1,0 +1,2 @@
+# Copy to dashboard_config.yaml (gitignored) and set your local path.
+profiles_dir: /Users/you/Desktop/mgen/multimodal-traffic-digital-twins/traffic_profiles
