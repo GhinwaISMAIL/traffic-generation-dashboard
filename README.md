@@ -62,7 +62,9 @@ streamlit run dashboard/app.py
 
 Set `profiles_dir` in `dashboard_config.yaml`, then use:
 
-- **Design** to write `scenario_config.yaml` for the notebook pipeline;
+- **Design** to choose 1–3 cells, set the common UEs-per-cell reservation, and
+  give every cell its own class distribution or named traffic profiles before
+  writing `scenario_config.yaml` for the notebook pipeline;
 - **Testbed** to enter the current core/cell POWDER hostnames;
 - **Results** to run the distributed experiment, validate collected logs,
   rebuild KPIs, and view traffic/PRB efficiency.

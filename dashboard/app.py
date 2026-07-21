@@ -88,86 +88,146 @@ elif page == "Design":
                                                  "telegram", "aparat"]
 
     st.subheader("Simulation")
-    sc = st.columns(3)
+    existing_cell_specs = scenario.cell_specs(base)
+    sim = base["simulation"]
+    default_cells = min(3, max(1, len(existing_cell_specs)))
+    default_ues_per_cell = int(sim.get(
+        "ues_per_cell", existing_cell_specs[0].get("n_ue", 4)))
+    sc = st.columns(4)
     duration = sc[0].number_input("Duration (s)", 30, 7200,
-                                  int(base["simulation"]["duration"]))
-    n_ue = sc[1].number_input("n_ue", 1, 32, int(base["simulation"]["n_ue"]))
-    seed = sc[2].number_input("random_seed", 0, 1_000_000,
-                              int(base["simulation"]["random_seed"]))
+                                  int(sim["duration"]))
+    num_cells = int(sc[1].number_input(
+        "Cells", 1, 3, int(sim.get("num_cells", default_cells))))
+    ues_per_cell = int(sc[2].number_input(
+        "UEs per cell", 1, 32, default_ues_per_cell))
+    seed = sc[3].number_input("random_seed", 0, 1_000_000,
+                              int(sim["random_seed"]))
+    n_ue = num_cells * ues_per_cell
+    st.info(
+        f"Scenario size: {num_cells} cell(s) x {ues_per_cell} UE(s) = "
+        f"{n_ue} UEs. Use the same values when reserving the POWDER profile.")
 
     st.subheader("Apps")
     default_apps = [a for a in base["apps"] if a in app_options] or app_options
     apps = st.multiselect("Apps (discovered from artifacts/)", app_options,
                           default=default_apps)
 
-    st.subheader("User classes")
-    st.caption("Realism templates learned from your data — their DL/UL split and "
-               "cluster weights feed each profile's `base`. The counts below only "
-               "assign UEs when no profiles are defined.")
-    d = base["user_classes"]["distribution"]
-    uc = st.columns(3)
-    heavy = uc[0].number_input("heavy", 0, 32, int(d.get("heavy", 0)))
-    medium = uc[1].number_input("medium", 0, 32, int(d.get("medium", 0)))
-    light = uc[2].number_input("light", 0, 32, int(d.get("light", 0)))
+    st.subheader("Per-cell UE specifications")
+    st.caption(
+        "Each cell has its own UE mix. Profiles control the learned realism base, "
+        "per-UE flow target, and application weights. Counts are checked separately "
+        "for every cell, so traffic assigned to Cell 1 cannot spill into Cell 2.")
 
-    st.subheader("Profiles")
-    existing_profiles = base.get("profiles") or []
-    use_profiles = st.toggle(
-        "Use profiles", value=bool(existing_profiles),
-        help="When on, the table below assigns UEs. When off, the class counts "
-             "above assign UEs and no profiles are written.")
+    def default_distribution(count):
+        heavy_count = count // 4
+        light_count = count // 4
+        return {"heavy": heavy_count,
+                "medium": count - heavy_count - light_count,
+                "light": light_count}
 
-    profiles = []
-    if use_profiles:
-        st.caption("Each row assigns UEs (count), a flow target, a realism `base`, "
-                   "and an app mix (relative weights; 0 excludes the app). Add rows "
-                   "with the + at the bottom of the table. Counts must sum to n_ue.")
-        rows = []
-        for p in existing_profiles:
-            f = p.get("flows", 10)
-            row = {"name": p.get("name", ""), "count": int(p.get("count", 0)),
-                   "base": p.get("base", "medium"),
-                   "flows": int(f[0] if isinstance(f, (list, tuple)) else f)}
-            mix = p.get("app_mix") or {}
-            for a in apps:
-                row[a] = float(mix.get(a, 0))
-            rows.append(row)
-        prof_df = pd.DataFrame(rows, columns=["name", "count", "base", "flows"] + apps)
-        edited = st.data_editor(
-            prof_df, num_rows="dynamic", use_container_width=True, hide_index=True,
-            column_config={
-                "name": st.column_config.TextColumn("name"),
-                "count": st.column_config.NumberColumn("count", min_value=0, step=1),
-                "base": st.column_config.SelectboxColumn(
-                    "base", options=["heavy", "medium", "light"]),
-                "flows": st.column_config.NumberColumn("flows", min_value=1, step=1),
-                **{a: st.column_config.NumberColumn(a, min_value=0.0, step=1.0)
-                   for a in apps},
-            },
-            key=f"profiles_editor_{'_'.join(apps)}")
+    cell_configs = []
+    tabs = st.tabs([f"Cell {index}" for index in range(1, num_cells + 1)])
+    for cell_index, tab in enumerate(tabs, start=1):
+        with tab:
+            existing_cell = next(
+                (item for item in existing_cell_specs
+                 if int(item.get("cell", 0)) == cell_index), {})
+            existing_profiles = existing_cell.get("profiles") or []
+            use_profiles = st.toggle(
+                "Use named profiles", value=bool(existing_profiles),
+                key=f"cell_{cell_index}_use_profiles",
+                help="Turn off to assign only heavy/medium/light class counts.")
 
-        for _, r in edited.iterrows():
-            nm = str(r.get("name") or "").strip()
-            if not nm or nm.lower() == "nan":
-                continue
-            mix = {a: float(r[a]) for a in apps
-                   if not pd.isna(r.get(a)) and float(r.get(a)) > 0}
-            profiles.append({
-                "name": nm,
-                "count": 0 if pd.isna(r.get("count")) else int(r.get("count")),
-                "base": "medium" if pd.isna(r.get("base")) else str(r.get("base")),
-                "flows": 1 if pd.isna(r.get("flows")) else int(r.get("flows")),
-                "app_mix": mix,
-            })
+            profiles = []
+            if use_profiles:
+                st.caption(
+                    f"Profile counts must sum to {ues_per_cell}. App values are "
+                    "relative weights; zero excludes that app from the profile.")
+                rows = []
+                for profile in existing_profiles:
+                    flows = profile.get("flows", 10)
+                    row = {
+                        "name": profile.get("name", ""),
+                        "count": int(profile.get("count", 0)),
+                        "base": profile.get("base", "medium"),
+                        "flows": int(flows[0] if isinstance(
+                            flows, (list, tuple)) else flows),
+                    }
+                    mix = profile.get("app_mix") or {}
+                    for app in apps:
+                        row[app] = float(mix.get(app, 0))
+                    rows.append(row)
+                if not rows:
+                    rows = [{
+                        "name": f"cell{cell_index}_medium",
+                        "count": ues_per_cell, "base": "medium", "flows": 10,
+                        **{app: 1.0 for app in apps},
+                    }]
+                prof_df = pd.DataFrame(
+                    rows, columns=["name", "count", "base", "flows"] + apps)
+                edited = st.data_editor(
+                    prof_df, num_rows="dynamic", use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "name": st.column_config.TextColumn("name"),
+                        "count": st.column_config.NumberColumn(
+                            "count", min_value=0, step=1),
+                        "base": st.column_config.SelectboxColumn(
+                            "base", options=["heavy", "medium", "light"]),
+                        "flows": st.column_config.NumberColumn(
+                            "flows / UE", min_value=1, step=1),
+                        **{app: st.column_config.NumberColumn(
+                            app, min_value=0.0, step=1.0) for app in apps},
+                    },
+                    key=f"cell_{cell_index}_profiles_{'_'.join(apps)}")
+                for _, row in edited.iterrows():
+                    name = str(row.get("name") or "").strip()
+                    if not name or name.lower() == "nan":
+                        continue
+                    mix = {
+                        app: float(row[app]) for app in apps
+                        if not pd.isna(row.get(app)) and float(row.get(app)) > 0
+                    }
+                    profiles.append({
+                        "name": name,
+                        "count": 0 if pd.isna(row.get("count")) else int(
+                            row.get("count")),
+                        "base": "medium" if pd.isna(row.get("base")) else str(
+                            row.get("base")),
+                        "flows": 1 if pd.isna(row.get("flows")) else int(
+                            row.get("flows")),
+                        "app_mix": mix,
+                    })
+                profile_total = sum(profile["count"] for profile in profiles)
+                (st.success if profile_total == ues_per_cell else st.error)(
+                    f"Cell {cell_index}: profile counts sum to {profile_total}; "
+                    f"expected {ues_per_cell}")
+                distribution = {}
+            else:
+                distribution = (existing_cell.get("distribution") or
+                                default_distribution(ues_per_cell))
+                columns = st.columns(3)
+                heavy = int(columns[0].number_input(
+                    "heavy", 0, 32, int(distribution.get("heavy", 0)),
+                    key=f"cell_{cell_index}_heavy"))
+                medium = int(columns[1].number_input(
+                    "medium", 0, 32, int(distribution.get("medium", 0)),
+                    key=f"cell_{cell_index}_medium"))
+                light = int(columns[2].number_input(
+                    "light", 0, 32, int(distribution.get("light", 0)),
+                    key=f"cell_{cell_index}_light"))
+                distribution = {"heavy": heavy, "medium": medium, "light": light}
+                class_total = sum(distribution.values())
+                (st.success if class_total == ues_per_cell else st.error)(
+                    f"Cell {cell_index}: class counts sum to {class_total}; "
+                    f"expected {ues_per_cell}")
 
-        ptot = sum(p["count"] for p in profiles)
-        (st.success if ptot == n_ue else st.error)(
-            f"profile counts sum to {ptot} — must equal n_ue ({n_ue})")
-    else:
-        st.caption("Profiles off — UEs are assigned by the class counts above.")
-        total = heavy + medium + light
-        (st.success if total == n_ue else st.error)(
-            f"user-class counts sum to {total} — must equal n_ue ({n_ue})")
+            cell_config = {"cell": cell_index, "n_ue": ues_per_cell}
+            if profiles:
+                cell_config["profiles"] = profiles
+            else:
+                cell_config["distribution"] = distribution
+            cell_configs.append(cell_config)
 
     sampling = st.selectbox("Sampling strategy", ["stratified", "random"],
                             index=0 if base["sampling_strategy"] != "random" else 1)
@@ -199,16 +259,19 @@ elif page == "Design":
     ul_port = pc[2].number_input("UL port (UE\u2192DN)", 1, 65535, int(net["ul_port"]))
 
     new_cfg = copy.deepcopy(base)  # carries the advanced blocks through untouched
-    new_cfg["simulation"] = {"duration": int(duration), "n_ue": int(n_ue),
-                             "random_seed": int(seed)}
+    new_cfg["simulation"] = {
+        "duration": int(duration), "num_cells": num_cells,
+        "ues_per_cell": ues_per_cell, "n_ue": n_ue,
+        "random_seed": int(seed),
+    }
     new_cfg["apps"] = apps
-    new_cfg["user_classes"]["distribution"] = {"heavy": int(heavy),
-                                               "medium": int(medium),
-                                               "light": int(light)}
-    if profiles:
-        new_cfg["profiles"] = profiles
-    else:
-        new_cfg.pop("profiles", None)
+    new_cfg["cells"] = cell_configs
+    new_cfg["user_classes"]["distribution"] = {
+        class_name: sum(int((cell.get("distribution") or {}).get(class_name, 0))
+                        for cell in cell_configs)
+        for class_name in ("heavy", "medium", "light")
+    }
+    new_cfg.pop("profiles", None)
     new_cfg["sampling_strategy"] = sampling
     new_cfg["temporal_correlation"].update({
         "enabled": bool(enabled),
@@ -259,9 +322,13 @@ else:  # Testbed
 
     same_kind = existing.get("testbed") == t["testbed"]
     cur_user = (existing.get("ues") or {}).get("username", "ghinwa")
-    n_ue = int(scenario.merged()["simulation"]["n_ue"])
-    st.info(f"Generating {n_ue} UEs to match scenario_config.yaml. The UE count is "
-            "set on the Design page — this follows it automatically.")
+    design_sim = scenario.merged()["simulation"]
+    n_ue = int(design_sim["n_ue"])
+    design_cells = int(design_sim.get("num_cells", 1))
+    design_ues_per_cell = int(design_sim.get("ues_per_cell", n_ue))
+    st.info(
+        f"Generating {n_ue} UEs as {design_cells} cell(s) x "
+        f"{design_ues_per_cell} UE(s), exactly as configured on the Design page.")
 
     fc = st.columns(2)
     allow_ph = fc[0].checkbox("allow_placeholder_hosts",
@@ -271,17 +338,15 @@ else:  # Testbed
 
     if kind == "ric5g":
         hosts = testbed_cfg.ric5g_hosts(existing) if same_kind else {}
-        existing_cells = len(((existing.get("nodes") or {}).get("cells") or [])) \
-            if same_kind else 2
-        identity = st.columns(3)
+        identity = st.columns(2)
         username = identity[0].text_input("SSH username", cur_user).strip()
         core_host = identity[1].text_input(
             "Core host", hosts.get("core", ""),
             placeholder="pcXXX.emulab.net").strip()
-        num_cells = int(identity[2].number_input(
-            "Number of reserved cells", 1, 3,
-            min(3, max(1, existing_cells))))
-        st.caption("Enter one host for every cell node reserved in the POWDER experiment.")
+        num_cells = design_cells
+        st.caption(
+            f"Enter one host for each of the {num_cells} cell nodes reserved in "
+            "POWDER. To change this count, update the Design page first.")
         host_columns = st.columns(num_cells)
         cell_hosts = [
             host_columns[index - 1].text_input(
@@ -290,14 +355,15 @@ else:  # Testbed
             for index in range(1, num_cells + 1)
         ]
         old_xapp = (existing.get("xapp") or {}) if same_kind else {}
-        old_ues = (existing.get("ues") or {}) if same_kind else {}
         old_dn = (existing.get("dn") or {}) if same_kind else {}
         old_mgen = (existing.get("mgen") or {}) if same_kind else {}
         old_runner = (existing.get("runner") or {}) if same_kind else {}
         with st.expander("Advanced distributed settings"):
             ac = st.columns(3)
-            ues_per_cell = ac[0].number_input(
-                "UEs per cell", 1, 32, int(old_ues.get("ues_per_cell", 12)))
+            ac[0].number_input(
+                "UEs per cell (from Design)", 1, 32,
+                design_ues_per_cell, disabled=True)
+            ues_per_cell = design_ues_per_cell
             xapp_enabled = ac[1].checkbox(
                 "Collect PRB with xApp", value=old_xapp.get("enabled", True))
             xapp_delay = ac[2].number_input(

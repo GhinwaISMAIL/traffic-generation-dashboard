@@ -13,7 +13,10 @@ import yaml
 from . import settings
 
 DEFAULTS = {
-    "simulation": {"duration": 600, "n_ue": 4, "random_seed": 42},
+    "simulation": {
+        "duration": 600, "num_cells": 1, "ues_per_cell": 4,
+        "n_ue": 4, "random_seed": 42,
+    },
     "apps": [],
     "user_classes": {
         "distribution": {"heavy": 1, "medium": 2, "light": 1},
@@ -63,30 +66,104 @@ def merged() -> dict:
                 _merge(dst[k], v)
             else:
                 dst[k] = v
+    existing = load()
     base = copy.deepcopy(DEFAULTS)
-    _merge(base, load())
+    _merge(base, existing)
+    old_sim = (existing.get("simulation") or {}) if existing else {}
+    if "num_cells" not in old_sim:
+        base["simulation"]["num_cells"] = 1
+    if "ues_per_cell" not in old_sim:
+        base["simulation"]["ues_per_cell"] = int(
+            base["simulation"].get("n_ue", 1))
     return base
+
+
+def cell_specs(cfg: dict) -> list[dict]:
+    """Return the traffic specification for each cell.
+
+    New scenarios carry an explicit ``cells`` list.  Older scenarios remain
+    readable as a single logical cell using their top-level distribution or
+    profiles block.
+    """
+    raw = cfg.get("cells") or []
+    if raw:
+        return sorted(copy.deepcopy(raw), key=lambda item: int(item["cell"]))
+
+    sim = cfg.get("simulation") or {}
+    n_ue = int(sim.get("n_ue", 0))
+    return [{
+        "cell": 1,
+        "n_ue": n_ue,
+        "distribution": copy.deepcopy(
+            ((cfg.get("user_classes") or {}).get("distribution") or {})),
+        "profiles": copy.deepcopy(cfg.get("profiles") or []),
+    }]
 
 
 def validate(cfg) -> list:
     """Return a list of human-readable errors ([] means valid)."""
     errs = []
-    n_ue = cfg["simulation"]["n_ue"]
-    profs = cfg.get("profiles") or []
-    if profs:
-        ptot = sum(int(p.get("count", 0)) for p in profs)
-        if ptot != n_ue:
-            errs.append(f"profile counts sum to {ptot}, must equal n_ue ({n_ue})")
-        for p in profs:
-            nm = p.get("name", "?")
-            if not (p.get("app_mix") or {}):
-                errs.append(f"profile '{nm}' has no apps selected")
-            if p.get("base") not in ("heavy", "medium", "light"):
-                errs.append(f"profile '{nm}' base must be heavy/medium/light")
-    else:
-        total = sum(cfg["user_classes"]["distribution"].values())
-        if total != n_ue:
-            errs.append(f"user-class counts sum to {total}, must equal n_ue ({n_ue})")
+    sim = cfg["simulation"]
+    n_ue = int(sim["n_ue"])
+    num_cells = int(sim.get("num_cells", 1))
+    ues_per_cell = int(sim.get("ues_per_cell", n_ue))
+    if not 1 <= num_cells <= 3:
+        errs.append("num_cells must be between 1 and 3")
+    if ues_per_cell < 1:
+        errs.append("ues_per_cell must be at least 1")
+    if n_ue != num_cells * ues_per_cell:
+        errs.append(
+            f"n_ue ({n_ue}) must equal num_cells x ues_per_cell "
+            f"({num_cells * ues_per_cell})")
+
+    cells = cell_specs(cfg)
+    if cfg.get("cells"):
+        ids = [int(cell.get("cell", 0)) for cell in cells]
+        if ids != list(range(1, num_cells + 1)):
+            errs.append("cell specifications must be consecutive from 1 to num_cells")
+        if len(cells) != num_cells:
+            errs.append(f"expected {num_cells} cell specifications, found {len(cells)}")
+
+    cell_total = 0
+    for cell in cells:
+        cell_id = int(cell.get("cell", 0))
+        cell_n = int(cell.get("n_ue", ues_per_cell))
+        cell_total += cell_n
+        if cfg.get("cells") and cell_n != ues_per_cell:
+            errs.append(
+                f"cell {cell_id} has {cell_n} UEs, expected {ues_per_cell}")
+        profs = cell.get("profiles") or []
+        if profs:
+            ptot = sum(int(p.get("count", 0)) for p in profs)
+            if ptot != cell_n:
+                errs.append(
+                    f"cell {cell_id} profile counts sum to {ptot}, "
+                    f"must equal {cell_n}")
+            for p in profs:
+                nm = p.get("name", "?")
+                if not (p.get("app_mix") or {}):
+                    errs.append(f"cell {cell_id} profile '{nm}' has no apps selected")
+                unknown_apps = sorted(set(p.get("app_mix") or {}) - set(cfg["apps"]))
+                if unknown_apps:
+                    errs.append(
+                        f"cell {cell_id} profile '{nm}' uses unselected apps: "
+                        f"{', '.join(unknown_apps)}")
+                if p.get("base") not in ("heavy", "medium", "light"):
+                    errs.append(
+                        f"cell {cell_id} profile '{nm}' base must be "
+                        "heavy/medium/light")
+                if int(p.get("flows", 0)) < 1:
+                    errs.append(
+                        f"cell {cell_id} profile '{nm}' flows must be at least 1")
+        else:
+            distribution = cell.get("distribution") or {}
+            total = sum(int(value) for value in distribution.values())
+            if total != cell_n:
+                errs.append(
+                    f"cell {cell_id} user-class counts sum to {total}, "
+                    f"must equal {cell_n}")
+    if cell_total != n_ue:
+        errs.append(f"cell UE counts sum to {cell_total}, must equal n_ue ({n_ue})")
     if not cfg["apps"]:
         errs.append("no apps selected")
     lo, hi = cfg["temporal_correlation"]["rtt_delay_range"]
