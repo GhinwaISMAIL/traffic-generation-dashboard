@@ -43,19 +43,20 @@ if page == "Results":
     except (FileNotFoundError, TypeError, yaml.YAMLError):
         active_testbed = {}
     distributed = ric5g.is_config(active_testbed)
+    configured = bool(active_testbed.get("testbed"))
 
     c1, c2, c3 = st.columns(3)
-    if c1.button("Run distributed experiment", disabled=not distributed,
-                 help="Uses deploy_ric5g.sh and the hosts on the Testbed page"):
+    if c1.button("Run configured experiment", disabled=not configured,
+                 help="Uses the profile and hosts currently saved on the Testbed page"):
         try:
-            with st.spinner("Running MGEN and the xApp on POWDER…"):
+            with st.spinner("Running the configured experiment on POWDER…"):
                 testbed.run_experiment(run_dir, active_testbed)
                 kpis.save_observed(run_dir)
             st.success("Experiment completed and KPIs were rebuilt.")
         except Exception as exc:
             st.error(f"Experiment failed: {exc}")
     fetch_label = "Verify collected logs" if distributed else "Fetch logs from testbed"
-    if c2.button(fetch_label):
+    if c2.button(fetch_label, disabled=not configured):
         try:
             with st.spinner("Checking artifacts…" if distributed else
                             "Copying logs back…"):

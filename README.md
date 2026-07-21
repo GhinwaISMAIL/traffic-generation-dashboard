@@ -23,6 +23,7 @@ folder. The CLI and Streamlit use the same Python modules and configuration.
 ```text
 traffic_profiles/run_<id>/
   config.json
+  run_profile.json
   designed_kpis.parquet
   observed_kpis.parquet
   mgen_scripts/
@@ -50,6 +51,14 @@ application, direction, and batch.
 throughput and FlexRIC PRB are joined on `(utc_second, ue)`, never on two
 independently-normalized timelines.
 
+`run_profile.json` is written when the experiment is launched. It snapshots the
+deployment type and measurement capabilities used for that run, so changing
+`testbed_config.yaml` later cannot reinterpret historical results. RFsim and
+COTS runs show their MGEN traffic KPIs; RIC5G runs additionally expose channel
+context, RIC/xApp health, PRB, and bits/PRB when xApp collection was enabled.
+Legacy runs without this file are labelled as inferred and use only the
+artifacts that are actually present.
+
 ## Setup
 
 ```bash
@@ -66,8 +75,9 @@ Set `profiles_dir` in `dashboard_config.yaml`, then use:
   give every cell its own class distribution or named traffic profiles before
   writing `scenario_config.yaml` for the notebook pipeline;
 - **Testbed** to enter the current core/cell POWDER hostnames;
-- **Results** to run the distributed experiment, validate collected logs,
-  rebuild KPIs, and view traffic/PRB efficiency.
+- **Results** to run the configured experiment, validate collected logs,
+  rebuild KPIs, and view only the KPI sections supported by that run's saved
+  deployment profile.
 
 ## CLI
 
@@ -89,5 +99,8 @@ by the runner and then builds `observed_kpis.parquet`.
 - Cross-node one-way latency requires synchronized clocks; request-response RTT
   derived on one UE does not.
 - `rnti_map.csv` is a per-run snapshot. Never reuse it after UE reattachment.
+- RIC5G supports live per-UE channel changes, but exact settings are displayed
+  only when the run contains `logs/channel_state.json`. Capability alone is not
+  treated as proof of which impairment value was active.
 - The xApp should run in a bounded window because raw `MAC_UE` data is roughly
   1 kHz per attached UE. The runner aggregates on the core before transfer.

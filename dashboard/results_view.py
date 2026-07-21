@@ -4,12 +4,13 @@ render(run_dir) draws the Plotly figures and PNG export buttons.
 """
 from pathlib import Path
 import io
+import re
 
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-from twindash import bursts, kpis, prb, timing
+from twindash import bursts, kpis, prb, run_profile, timing
 
 INK       = "#3D5A6C"   # text, axes
 DL        = "#8BA9C9"   # downlink
@@ -24,6 +25,92 @@ APP_COLORS = {
     "youtube":  "#C77B7B",
 }
 FONT = dict(family="Inter, Helvetica, Arial, sans-serif", color=INK)
+
+CAPABILITY_LABELS = {
+    "flow_kpis": "MGEN traffic KPIs",
+    "latency": "flow latency",
+    "channel_model": "per-UE channel model",
+    "ric": "near-RT RIC",
+    "xapp": "xApp monitoring",
+    "prb": "PRB counters",
+    "radio_efficiency": "bits/PRB",
+}
+
+
+def _render_profile(profile):
+    topology = profile.get("topology") or {}
+    parts = [profile.get("label", "Unknown profile")]
+    if topology.get("cells"):
+        parts.append(f"{topology['cells']} cell(s)")
+    if topology.get("ues"):
+        parts.append(f"{topology['ues']} UE(s)")
+    caps = profile.get("capabilities") or {}
+    enabled = [label for key, label in CAPABILITY_LABELS.items()
+               if caps.get(key)]
+    unavailable = [label for key, label in CAPABILITY_LABELS.items()
+                   if not caps.get(key)]
+    st.info("**Run profile:** " + " · ".join(parts) + "\n\n"
+            + "Measurements enabled: " + ", ".join(enabled))
+    if unavailable:
+        st.caption("Not provided by this run profile: " + ", ".join(unavailable))
+    if profile.get("inferred"):
+        st.caption(
+            "This is a legacy run with no run_profile.json. Capabilities were "
+            "inferred conservatively from the artifacts saved with the run.")
+    if profile.get("profile_error"):
+        st.warning(profile["profile_error"])
+
+
+def _render_channel_context(run_dir, profile):
+    caps = profile.get("capabilities") or {}
+    if not caps.get("channel_model"):
+        return
+    st.markdown("#### Channel context")
+    state = run_profile.channel_state(run_dir)
+    if state is None:
+        st.info(
+            "This profile supports per-cell/per-UE channel models and runtime "
+            "`channelmod` control. This run did not save `logs/channel_state.json`, "
+            "so the radio results are valid but the exact live impairment values "
+            "cannot be labelled retroactively.")
+    else:
+        st.caption("Channel state captured with this run:")
+        st.json(state, expanded=False)
+
+
+def _render_xapp_health(run_dir, profile):
+    caps = profile.get("capabilities") or {}
+    if not caps.get("ric"):
+        return
+    st.markdown("#### RIC / xApp")
+    if not caps.get("xapp"):
+        st.caption("The RIC was part of this profile, but xApp collection was disabled.")
+        return
+    path = Path(run_dir) / "logs" / "xapp.log"
+    if not path.exists():
+        st.warning("xApp monitoring was enabled for this run, but logs/xapp.log is missing.")
+        return
+    text = path.read_text(errors="replace")
+    error_lines = [
+        line for line in text.splitlines()
+        if re.search(
+            r"assert|abort|timeout|pending event|connection lost|segmentation|error",
+            line, re.IGNORECASE)
+    ]
+    expected = (profile.get("xapp") or {}).get("expected_subscriptions")
+    subscriptions = text.count("Successfully subscribed")
+    deletes = text.count("SUBSCRIPTION DELETE RESPONSE rx")
+    columns = st.columns(4)
+    columns[0].metric("Subscriptions", f"{subscriptions}/{expected}"
+                      if expected is not None else subscriptions)
+    columns[1].metric("Delete responses", deletes)
+    columns[2].metric("xApp errors", len(error_lines))
+    columns[3].metric(
+        "Clean shutdown",
+        "yes" if "Test xApp run SUCCESSFULLY" in text else "not recorded")
+    if error_lines:
+        with st.expander("xApp error lines"):
+            st.code("\n".join(error_lines[-30:]))
 
 
 def _layout(fig, title, ylab, height=320, log_y=False):
@@ -146,6 +233,10 @@ def _png_bytes(fig):
 
 def render(run_dir):
     run_dir = Path(run_dir)
+    profile = run_profile.load(run_dir)
+    capabilities = profile.get("capabilities") or {}
+    _render_profile(profile)
+
     obs = kpis.build_observed(run_dir)
     if obs is None or obs.empty:
         st.info("No flow-level KPIs yet — run traffic and fetch logs to populate "
@@ -173,20 +264,35 @@ def render(run_dir):
         st.plotly_chart(_loss_fig(obs), use_container_width=True)
     with b:
         st.plotly_chart(_latency_fig(obs), use_container_width=True)
-    st.caption("Latency is converted to UTC with per-node run anchors. Absolute "
-               "values still depend on the POWDER nodes being clock-synchronized.")
+    tm = timing.load(run_dir)
+    if tm:
+        st.caption("Latency is converted to UTC with per-node run anchors. Absolute "
+                   "values still depend on the POWDER nodes being clock-synchronized.")
+    elif profile.get("testbed") == run_profile.RFSIM:
+        st.caption("RFsim containers share one node clock; no cross-node UTC anchor "
+                   "was saved for this run.")
+    else:
+        st.warning("No run_timing.json was saved. Cross-node latency can include "
+                   "clock skew and should not be treated as calibrated latency.")
 
     st.markdown("#### Designed vs realized")
     dvr_fig = _designed_vs_realized_fig(obs, designed)
     st.plotly_chart(dvr_fig, use_container_width=True)
 
+    _render_channel_context(run_dir, profile)
+    _render_xapp_health(run_dir, profile)
+
     extra_figs = {}
-    try:
-        prb_data = prb.prb_timeseries(run_dir)
-    except (OSError, ValueError, pd.errors.ParserError) as exc:
-        st.warning(f"PRB data could not be loaded: {exc}")
-        prb_data = pd.DataFrame()
-    if not prb_data.empty:
+    prb_data = pd.DataFrame()
+    if capabilities.get("prb"):
+        try:
+            prb_data = prb.prb_timeseries(run_dir)
+        except (OSError, ValueError, pd.errors.ParserError) as exc:
+            st.warning(f"PRB data could not be loaded: {exc}")
+        if prb_data.empty:
+            st.warning("PRB collection belongs to this run profile, but no usable "
+                       "logs/prb_by_second.csv rows were found.")
+    if capabilities.get("prb") and not prb_data.empty:
         st.markdown("#### Radio resources")
         mapped = int(prb_data.get("mapped", prb_data["ue"].notna()).sum())
         st.caption(
@@ -211,12 +317,15 @@ def render(run_dir):
                 st.plotly_chart(eff_fig, use_container_width=True)
                 extra_figs["bits_per_prb"] = eff_fig
 
-        tm = timing.load(run_dir)
         window = timing.xapp_window(tm) if tm else None
         if window:
             st.caption(
                 f"xApp UTC window: {window[0]:.3f}–{window[1]:.3f}; "
                 "MGEN and PRB were joined on absolute epoch seconds and UE.")
+    elif not capabilities.get("prb"):
+        st.caption(
+            "Radio-resource and bits/PRB charts are hidden because this run's "
+            "deployment profile did not provide RIC/xApp PRB measurements.")
 
     st.markdown("#### Export figures")
     figs = {"throughput_dl": tp_dl, "throughput_ul": tp_ul,

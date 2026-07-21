@@ -3,6 +3,7 @@ dashboard agree on, so nobody hardcodes a path twice.
 
 traffic_profiles/run_<id>/
     config.json            # written by the notebook pipeline
+    run_profile.json       # deployment/testbed capabilities captured at run time
     designed_kpis.parquet  # the projection (offered load) per flow
     observed_kpis.parquet  # built after a run from the logs
     mgen_scripts/          # the .mgn files
@@ -10,6 +11,7 @@ traffic_profiles/run_<id>/
 """
 
 CONFIG = "config.json"
+RUN_PROFILE = "run_profile.json"
 DESIGNED_KPIS = "designed_kpis.parquet"
 OBSERVED_KPIS = "observed_kpis.parquet"
 LOGS_DIR = "logs"

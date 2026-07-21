@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from . import ric5g, schema, settings
+from . import ric5g, run_profile, schema, settings
 
 
 def load_testbed_config(path=None):
@@ -38,6 +38,9 @@ def _node_run_name(run_dir, fallback):
 def fetch_logs(run_name, run_dir, cfg):
     """Pull DN + UE logs into <run>/logs. Read-only on the testbed side.
     Handles RFsim (single node, logs in containers) and COTS (NUC files)."""
+    # Preserve an existing deployment identity.  For a legacy run this action
+    # is the first point where the dashboard knows which testbed supplied it.
+    run_profile.record(run_dir, cfg, overwrite=False)
     logs = Path(run_dir) / schema.LOGS_DIR
     logs.mkdir(exist_ok=True)
     if ric5g.is_config(cfg):
@@ -98,6 +101,9 @@ def run_script(path):
 
 def run_experiment(run_dir, cfg):
     """Dispatch to the topology-specific, validated execution path."""
+    # testbed_config.yaml describes the next run and can change afterwards.
+    # Snapshot it before dispatch so Results never depends on today's selection.
+    run_profile.record(run_dir, cfg, overwrite=True)
     if ric5g.is_config(cfg):
         return ric5g.run(run_dir, cfg)
     return run_script(Path(run_dir) / "deployment" / "dn_commands.sh")
