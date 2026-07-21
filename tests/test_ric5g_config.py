@@ -3,11 +3,13 @@ import json
 from twindash import ric5g, testbed_cfg
 
 
-def config(n_ue=24):
+def config(n_ue=24, n_cells=2):
+    available = ["pc05-fort.emulab.net", "pc11-fort.emulab.net",
+                 "pc12-fort.emulab.net"]
     return testbed_cfg.build_ric5g(
         username="ghinwa", n_ue=n_ue,
         core_host="pc798.emulab.net",
-        cell_hosts=["pc05-fort.emulab.net", "pc11-fort.emulab.net"],
+        cell_hosts=available[:n_cells],
         flags={"allow_placeholder_hosts": False})
 
 
@@ -35,6 +37,34 @@ def test_runner_environment_comes_from_config():
     assert env["CELL2_HOST"] == "ghinwa@pc11-fort.emulab.net"
     assert env["NB_ID_START"] == "3584"
     assert env["XAPP_SUBS"] == "8"
+
+
+def test_three_cells_map_and_export_all_hosts():
+    cfg = config(n_ue=36, n_cells=3)
+    boxes = cfg["ues"]["boxes"]
+    assert boxes["ue25"]["container"] == "ric5g-ue-cell3-1"
+    assert boxes["ue36"]["container"] == "ric5g-ue-cell3-12"
+    assert cfg["ric"]["expected_e2_nodes"] == 3
+    assert cfg["xapp"]["expected_subscriptions"] == 12
+    env = ric5g.environment(cfg)
+    assert env["NUM_CELLS"] == "3"
+    assert env["CELL3_HOST"] == "ghinwa@pc12-fort.emulab.net"
+    assert env["XAPP_SUBS"] == "12"
+    assert testbed_cfg.validate(cfg, allow_placeholder=False) == []
+
+
+def test_one_cell_is_supported():
+    cfg = config(n_ue=12, n_cells=1)
+    assert ric5g.environment(cfg)["NUM_CELLS"] == "1"
+    assert cfg["xapp"]["expected_subscriptions"] == 4
+    assert testbed_cfg.validate(cfg, allow_placeholder=False) == []
+
+
+def test_duplicate_cell_host_is_rejected():
+    cfg = config()
+    cfg["nodes"]["cells"][1]["ssh_host"] = cfg["nodes"]["cells"][0]["ssh_host"]
+    errors = testbed_cfg.validate(cfg, allow_placeholder=False)
+    assert any("must be distinct" in error for error in errors)
 
 
 def test_nested_duration_is_supported(tmp_path):

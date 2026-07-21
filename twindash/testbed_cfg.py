@@ -118,6 +118,8 @@ def build_ric5g(*, username, n_ue, core_host, cell_hosts,
     flags = flags or {}
     ues_per_cell = int(ues_per_cell)
     cell_hosts = list(cell_hosts)
+    if not 1 <= len(cell_hosts) <= 3:
+        raise ValueError("RIC5G requires between 1 and 3 cell hosts")
     nodes = []
     for index, host in enumerate(cell_hosts, start=1):
         nodes.append({
@@ -226,25 +228,39 @@ def validate(cfg, allow_placeholder) -> list:
     errs = []
     if cfg.get("testbed") == TEMPLATES["ric5g"]["testbed"]:
         nodes = cfg.get("nodes") or {}
+        cells = nodes.get("cells") or []
         named_hosts = [("core", (nodes.get("core") or {}).get("ssh_host"))]
         named_hosts += [(f"cell{c.get('cell')}", c.get("ssh_host"))
-                        for c in nodes.get("cells") or []]
-        if len(named_hosts) < 3:
-            errs.append("RIC5G requires one core host and at least two cell hosts")
+                        for c in cells]
+        if not 1 <= len(cells) <= 3:
+            errs.append("RIC5G requires between 1 and 3 cell hosts")
+        cell_ids = [c.get("cell") for c in cells]
+        if cell_ids != list(range(1, len(cells) + 1)):
+            errs.append("cell indices must be consecutive starting at 1")
         if not allow_placeholder:
             for name, host in named_hosts:
                 after = (host or "").split("@", 1)[-1]
                 if not after or "<" in after:
                     errs.append(f"{name} SSH host is not set")
+        hosts = [host for _, host in named_hosts if host]
+        if len(hosts) != len(set(hosts)):
+            errs.append("core and cell SSH hosts must be distinct")
 
         boxes = (cfg.get("ues") or {}).get("boxes") or {}
-        capacity = len(nodes.get("cells") or []) * int(
+        capacity = len(cells) * int(
             (cfg.get("ues") or {}).get("ues_per_cell", 0))
         if len(boxes) > capacity:
             errs.append(f"{len(boxes)} UEs exceed the configured cell capacity ({capacity})")
-        nb_ids = [c.get("nb_id") for c in nodes.get("cells") or []]
+        nb_ids = [c.get("nb_id") for c in cells]
         if len(nb_ids) != len(set(nb_ids)):
             errs.append("cell nb_id values must be unique")
+        if (cfg.get("ric") or {}).get("expected_e2_nodes") != len(cells):
+            errs.append("expected_e2_nodes must equal the number of cells")
+        expected_subscriptions = 4 * len(cells)
+        if (cfg.get("xapp") or {}).get("expected_subscriptions") != expected_subscriptions:
+            errs.append(
+                f"expected_subscriptions must be {expected_subscriptions} "
+                f"for {len(cells)} cell(s)")
     else:
         host = cfg["dn"]["ssh_host"]
         after = host.split("@", 1)[1] if "@" in host else host

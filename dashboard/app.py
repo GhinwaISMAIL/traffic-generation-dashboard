@@ -246,7 +246,7 @@ else:  # Testbed
     }
     kind_default = kind_for_testbed.get(existing.get("testbed"), "ric5g")
     labels = {
-        "ric5g": "RIC5G distributed (core + 2 cells)",
+        "ric5g": "RIC5G distributed (core + 1–3 cells)",
         "rfsim": "RFsim (Docker, single node)",
         "cots": "COTS (physical UEs)",
     }
@@ -271,14 +271,24 @@ else:  # Testbed
 
     if kind == "ric5g":
         hosts = testbed_cfg.ric5g_hosts(existing) if same_kind else {}
-        username = st.text_input("SSH username", cur_user).strip()
-        hc = st.columns(3)
-        core_host = hc[0].text_input("Core host", hosts.get("core", ""),
-                                     placeholder="pcXXX.emulab.net").strip()
-        cell1_host = hc[1].text_input("Cell 1 host", hosts.get("cell1", ""),
-                                      placeholder="pcXX-site.emulab.net").strip()
-        cell2_host = hc[2].text_input("Cell 2 host", hosts.get("cell2", ""),
-                                      placeholder="pcXX-site.emulab.net").strip()
+        existing_cells = len(((existing.get("nodes") or {}).get("cells") or [])) \
+            if same_kind else 2
+        identity = st.columns(3)
+        username = identity[0].text_input("SSH username", cur_user).strip()
+        core_host = identity[1].text_input(
+            "Core host", hosts.get("core", ""),
+            placeholder="pcXXX.emulab.net").strip()
+        num_cells = int(identity[2].number_input(
+            "Number of reserved cells", 1, 3,
+            min(3, max(1, existing_cells))))
+        st.caption("Enter one host for every cell node reserved in the POWDER experiment.")
+        host_columns = st.columns(num_cells)
+        cell_hosts = [
+            host_columns[index - 1].text_input(
+                f"Cell {index} host", hosts.get(f"cell{index}", ""),
+                placeholder="pcXX-site.emulab.net", key=f"ric5g_cell_{index}").strip()
+            for index in range(1, num_cells + 1)
+        ]
         old_xapp = (existing.get("xapp") or {}) if same_kind else {}
         old_ues = (existing.get("ues") or {}) if same_kind else {}
         old_dn = (existing.get("dn") or {}) if same_kind else {}
@@ -307,7 +317,7 @@ else:  # Testbed
 
         cfg = testbed_cfg.build_ric5g(
             username=username, n_ue=n_ue, core_host=core_host,
-            cell_hosts=[cell1_host, cell2_host], ues_per_cell=int(ues_per_cell),
+            cell_hosts=cell_hosts, ues_per_cell=int(ues_per_cell),
             dn_container=dn_container, ue_container_tpl=ue_container_tpl,
             remote_bin=remote_bin, runner=runner, xapp_enabled=xapp_enabled,
             xapp_delay_s=int(xapp_delay), xapp_window_s=int(xapp_window),

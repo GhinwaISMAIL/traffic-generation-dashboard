@@ -12,7 +12,7 @@ folder. The CLI and Streamlit use the same Python modules and configuration.
 2. The Testbed page writes the pipeline repository's gitignored
    `testbed_config.yaml`.
 3. For `powder_ric5g_distributed`, `twindash` launches the pipeline's tracked
-   `deploy_ric5g.sh`. That script uses SSH to the core and two cells and calls
+   `deploy_ric5g.sh`. That script uses SSH to the core and 1–3 selected cells and calls
    `/local/repository/bin/mgen-{core,cell}.sh` on the nodes.
 4. The runner collects MGEN logs, the per-run RNTI map, xApp output, compact PRB
    CSV, and clock anchors into `<run>/logs/`. Results are then local and
