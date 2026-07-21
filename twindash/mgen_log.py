@@ -17,12 +17,14 @@ from pathlib import Path
 
 import pandas as pd
 
+from . import timing as _timing
+
 _TS = re.compile(r"^(\d{2}):(\d{2}):(\d{2})\.(\d+)$")
 
 
 def _ts_to_seconds(tok):
-    """HH:MM:SS.ffffff -> seconds since midnight (float). Runs are short, so
-    we don't worry about a midnight rollover."""
+    """HH:MM:SS.ffffff -> seconds since local midnight (float). Rollover is
+    handled in timing.to_utc(), which needs the node anchor."""
     if tok is None:
         return None
     m = _TS.match(tok)
@@ -44,8 +46,20 @@ def _as_int(v):
     return int(v) if v is not None and str(v).isdigit() else None
 
 
-def parse_log(path) -> pd.DataFrame:
-    """Return a DataFrame of SEND/RECV events from one MGEN log file."""
+def parse_log(path, midnight_epoch=None, ref_sod=None,
+              sent_midnight_epoch=None) -> pd.DataFrame:
+    """SEND/RECV events from one MGEN log.
+
+    midnight_epoch      epoch second of local midnight on the node that wrote
+                        this log; when given, adds absolute `utc_time`.
+    ref_sod             that node's seconds-since-midnight at anchor capture,
+                        used to detect a midnight rollover.
+    sent_midnight_epoch anchor for the `sent>` stamp, which is the *sender's*
+                        clock (a different node for DL). Defaults to
+                        midnight_epoch.
+    """
+    if sent_midnight_epoch is None:
+        sent_midnight_epoch = midnight_epoch
     rows = []
     for line in Path(path).open():
         parts = line.split()
@@ -58,15 +72,19 @@ def parse_log(path) -> pd.DataFrame:
                 rec[key] = val
         src_ip, src_port = _split_addr(rec.get("src"))
         dst_ip, dst_port = _split_addr(rec.get("dst"))
+        t = _ts_to_seconds(parts[0])
+        sent = _ts_to_seconds(rec.get("sent"))
         rows.append({
-            "time": _ts_to_seconds(parts[0]),
+            "time": t,
+            "utc_time": _timing.to_utc(t, midnight_epoch, ref_sod),
             "event": parts[1],
             "flow_id": _as_int(rec.get("flow")),
             "seq": _as_int(rec.get("seq")),
             "src_ip": src_ip, "src_port": src_port,
             "dst_ip": dst_ip, "dst_port": dst_port,
             "size": _as_int(rec.get("size")),
-            "sent_time": _ts_to_seconds(rec.get("sent")),
+            "sent_time": sent,
+            "sent_utc_time": _timing.to_utc(sent, sent_midnight_epoch, ref_sod),
         })
     return pd.DataFrame(rows)
 

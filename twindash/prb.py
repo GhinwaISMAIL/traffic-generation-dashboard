@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import kpis
+from . import kpis, timing
 
 PRB_CSV = "prb_by_second.csv"
 RNTI_MAP = "rnti_map.csv"
@@ -54,7 +54,8 @@ def prb_timeseries(run_dir) -> pd.DataFrame:
         df["ue"] = df["rnti"].astype(str)
 
     df["t_s"] = df["utc_second"] - df["utc_second"].min()
-    keep = ["t_s", "ue", "cell", "nb_id", "rnti", "dl_prb", "ul_prb", "samples"]
+    keep = ["utc_second", "t_s", "ue", "cell", "nb_id", "rnti",
+            "dl_prb", "ul_prb", "samples"]
     keep += [c for c in df.columns if c.endswith("_avg")]
     out = df[[c for c in keep if c in df.columns]].reset_index(drop=True)
     out.attrs["epoch_boundaries"] = epochs
@@ -76,8 +77,14 @@ def idle_floor(prb: pd.DataFrame, driven: set) -> pd.DataFrame:
 
 def efficiency(run_dir, window_s: float = 1.0) -> pd.DataFrame:
     """App-layer bits per resource block, per UE per second.
-    Joins throughput (MGEN logs) to PRB (xApp) on (t_s, ue). Both sides are
-    wall-clock seconds, so this relies on NTP sync across core and cell nodes."""
+
+    Joins throughput (MGEN logs) to PRB (xApp) on (utc_second, ue) — absolute
+    epoch seconds on both sides. The two clocks start at different moments (the
+    xApp window opens minutes into the run), so joining on each side's own
+    relative t_s pairs unrelated seconds and silently yields plausible,
+    wrong numbers. If the MGEN side has no absolute time — logs/run_timing.json
+    missing — this returns empty rather than guessing.
+    """
     prb = prb_timeseries(run_dir)
     if prb.empty:
         return pd.DataFrame()
@@ -85,9 +92,21 @@ def efficiency(run_dir, window_s: float = 1.0) -> pd.DataFrame:
     tp = kpis.throughput_timeseries(run_dir, window_s=window_s, per="ue")
     if tp.empty:
         return pd.DataFrame()
+    if "utc_second" not in tp.columns:
+        out = pd.DataFrame()
+        out.attrs["error"] = ("no run_timing.json in logs/ — MGEN timestamps "
+                              "have no date/zone anchor, so PRB cannot be "
+                              "aligned to traffic")
+        return out
 
-    tp = (tp.groupby(["t_s", "ue"])["mbps"].sum().reset_index())
-    j = tp.merge(prb[["t_s", "ue", "dl_prb", "ul_prb"]], on=["t_s", "ue"], how="inner")
+    tp = (tp.groupby(["utc_second", "ue"])["mbps"].sum().reset_index())
+    j = tp.merge(prb[["utc_second", "ue", "dl_prb", "ul_prb"]],
+                 on=["utc_second", "ue"], how="inner")
     total_prb = j["dl_prb"] + j["ul_prb"]
     j["bits_per_prb"] = (j["mbps"] * 1e6 * window_s) / total_prb.replace(0, pd.NA)
+    j["t_s"] = j["utc_second"] - j["utc_second"].min()
+    tm = timing.load(run_dir)
+    if tm and not timing.zones_agree(tm):
+        j.attrs["warning"] = ("node local midnights disagree — check time zones "
+                              "before trusting cross-node latency")
     return j

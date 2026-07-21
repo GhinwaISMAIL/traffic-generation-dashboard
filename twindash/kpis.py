@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import schema, mgen_log, mgen_script
+from . import schema, mgen_log, mgen_script, timing
 
 
 def _flow_map(run_dir: Path) -> pd.DataFrame:
@@ -51,10 +51,15 @@ def run_duration(run_dir: Path, observed_span: float | None = None) -> float | N
 
 def _load_events(run_dir: Path):
     logs = run_dir / schema.LOGS_DIR
+    tm = timing.load(run_dir)
     sent_frames, recv_frames = [], []
     for log in sorted(logs.glob("*.log")):
-        _node, direction = mgen_log.parse_run_name(log.name)
-        df = mgen_log.parse_log(log)
+        node_tag, direction = mgen_log.parse_run_name(log.name)
+        node = timing.node_of(tm, node_tag)
+        df = mgen_log.parse_log(
+            log,
+            midnight_epoch=timing.midnight_epoch(tm, node),
+            ref_sod=timing.anchor_sod(tm, node))
         if df.empty:
             continue
         df["direction"] = direction
@@ -152,20 +157,38 @@ def by_app(run_dir) -> pd.DataFrame:
 def throughput_timeseries(run_dir, window_s: float = 1.0, per: str = "ue") -> pd.DataFrame:
     """Delivered throughput over fixed time windows — shows burst structure and
     overlays against PRB. `per` is 'ue' (PRB-compatible), 'app', or 'flow'.
-    Windows are relative to the first received packet (t=0)."""
+
+    When logs/run_timing.json is present the windows are absolute epoch seconds
+    (`utc_second`), which is what PRB joins on; `t_s` is then that column made
+    relative for plotting. Without it only the relative `t_s` exists and the
+    PRB join is refused rather than silently misaligned."""
     run_dir = Path(run_dir)
     _sent, recv = _load_events(run_dir)
     if recv.empty:
         return pd.DataFrame(columns=["t_s", per, "direction", "mbps"])
     fbm = _flow_map(run_dir)
     recv = recv.merge(fbm, on=["flow_id", "direction"], how="left").dropna(subset=["ue"])
-    t0 = recv["time"].min()
-    recv["win"] = ((recv["time"] - t0) // window_s * window_s)
     keycol = {"ue": "ue", "app": "app", "flow": "flow_id"}[per]
+    has_utc = "utc_time" in recv.columns and recv["utc_time"].notna().any()
+
+    if has_utc:
+        recv["win"] = (recv["utc_time"] // window_s) * window_s
+    else:
+        t0 = recv["time"].min()
+        recv["win"] = ((recv["time"] - t0) // window_s) * window_s
+
     g = (recv.groupby(["win", keycol, "direction"])
              .agg(bytes=("size", "sum")).reset_index())
     g["mbps"] = (g["bytes"] * 8) / window_s / 1e6
-    return g.rename(columns={"win": "t_s"})[["t_s", keycol, "direction", "mbps"]]
+
+    cols = ["t_s", keycol, "direction", "mbps"]
+    if has_utc:
+        g["utc_second"] = g["win"]
+        g["t_s"] = g["win"] - g["win"].min()
+        cols.append("utc_second")
+    else:
+        g = g.rename(columns={"win": "t_s"})
+    return g[cols]
 
 
 def save_observed(run_dir) -> Path:
