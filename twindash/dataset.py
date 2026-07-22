@@ -159,6 +159,8 @@ def training_frame(run_dir) -> pd.DataFrame:
     """One row per measured UE/UTC second, suitable for model training."""
     run_dir = Path(run_dir)
     radio = prb.prb_timeseries(run_dir)
+    if radio.empty and radio.attrs.get("error"):
+        raise ValueError(radio.attrs["error"])
     traffic = _traffic_frame(run_dir)
     if radio.empty and traffic.empty:
         return pd.DataFrame()
@@ -234,12 +236,28 @@ def quality(run_dir: Path, features: pd.DataFrame) -> dict:
     radio_rows = int(features.get("dl_prb", pd.Series(dtype=float)).notna().sum())
     channel_rows = int(features.get(
         "channel_verified", pd.Series(dtype=bool)).fillna(False).sum())
+    dual_clock = all(column in features for column in prb.DUAL_CLOCK_COLUMNS)
+    if dual_clock and not features.empty:
+        receipt_span = (
+            features["recv_tstamp_us"].max() - features["recv_tstamp_us"].min()
+        ) / 1e6
+        source_span = (
+            features["source_tstamp_us"].max() - features["source_tstamp_us"].min()
+        ) / 1e6
+        source_wall_ratio = (
+            float(source_span / receipt_span) if receipt_span > 0 else None)
+    else:
+        source_wall_ratio = None
     return {
         "expected_ues": expected_ues,
         "measured_ues": measured_ues,
         "ue_coverage": (measured_ues / expected_ues if expected_ues else None),
         "feature_rows": len(features),
         "radio_rows": radio_rows,
+        "radio_clock": "dual" if dual_clock else (
+            "not captured" if not radio_rows else "legacy"),
+        "radio_clock_valid": bool(dual_clock or not radio_rows),
+        "source_wall_ratio": source_wall_ratio,
         "channel_labeled_rows": channel_rows,
         "channel_schedule_enabled": bool(schedule.get("enabled", False)),
         "channel_state_verified": bool(state and state.get("success")),
@@ -377,6 +395,13 @@ def export(records: list[Execution], destination: Path, *, include_csv: bool = F
     temporary.mkdir(parents=True)
     feature_frames, flow_frames, manifest = [], [], []
     for record in records:
+        quality_doc = record.metadata.get("quality", {}) or {}
+        if (quality_doc.get("radio_rows", 0) and
+                not quality_doc.get("radio_clock_valid", False)):
+            raise ValueError(
+                f"{record.execution_id} is a pre-dual-clock radio capture. "
+                "Unselect it or repeat the execution after the FlexRIC receipt-"
+                "timestamp patch; RFsim source time cannot be joined to MGEN UTC")
         split = _split(record.execution_id)
         features = pd.read_parquet(record.path / schema.UE_SECOND_FEATURES)
         features["split"] = split

@@ -57,11 +57,11 @@ ue1,1,1,3584,100,12.1.1.10
 ue13,2,1,3585,200,12.1.1.30
 """)
     _write(logs / "prb_by_second.csv", """
-utc_second,nb_id,rnti,dl_aggr_prb,ul_aggr_prb,samples
-1035999,3584,100,10,20,1000
-1036000,3584,100,20,25,1000
-1035999,3585,200,50,60,1000
-1036000,3585,200,52,70,1000
+utc_second,recv_tstamp_us,source_tstamp_us,nb_id,rnti,dl_aggr_prb,ul_aggr_prb,samples
+1035999,1035999000000,5000000,3584,100,10,20,1000
+1036000,1036000000000,5500000,3584,100,20,25,1000
+1035999,1035999000000,5000000,3585,200,50,60,1000
+1036000,1036000000000,5500000,3585,200,52,70,1000
 """)
     return run
 
@@ -101,3 +101,27 @@ def test_duplicate_rnti_mapping_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="maps to multiple"):
         prb.load_rnti_map(run)
 
+
+def test_legacy_source_clock_is_rejected(tmp_path):
+    run = sample_run(tmp_path)
+    path = run / "logs" / "prb_by_second.csv"
+    frame = pd.read_csv(path).drop(columns=["recv_tstamp_us", "source_tstamp_us"])
+    frame.to_csv(path, index=False)
+    radio = prb.prb_timeseries(run)
+    assert radio.empty
+    assert "RFsim/radio time" in radio.attrs["error"]
+
+
+def test_irregular_receipt_interval_is_not_joined_to_full_mgen_second(tmp_path):
+    run = sample_run(tmp_path)
+    path = run / "logs" / "prb_by_second.csv"
+    frame = pd.read_csv(path)
+    extra = frame[frame["utc_second"] == 1036000].copy()
+    extra["utc_second"] = 1036001
+    extra["recv_tstamp_us"] += 100_000
+    extra["source_tstamp_us"] += 50_000
+    extra[["dl_aggr_prb", "ul_aggr_prb"]] += 1
+    pd.concat([frame, extra], ignore_index=True).to_csv(path, index=False)
+    radio = prb.prb_timeseries(run)
+    assert radio.attrs["irregular_intervals"] == 2
+    assert set(radio["utc_second"]) == {1036000}

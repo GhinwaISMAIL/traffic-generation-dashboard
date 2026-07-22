@@ -52,9 +52,9 @@ def sample_run(tmp_path):
         "ue,cell,ue_index,nb_id,rnti,pdu_ip\n"
         "ue1,1,1,3584,100,12.1.1.2\n")
     (logs / "prb_by_second.csv").write_text(
-        "utc_second,nb_id,rnti,dl_aggr_prb,ul_aggr_prb,samples\n"
-        "1000010,3584,100,10,20,1000\n"
-        "1000011,3584,100,20,25,1000\n")
+        "utc_second,recv_tstamp_us,source_tstamp_us,nb_id,rnti,dl_aggr_prb,ul_aggr_prb,samples\n"
+        "1000010,1000010000000,5000000,3584,100,10,20,1000\n"
+        "1000011,1000011000000,5500000,3584,100,20,25,1000\n")
     (logs / "xapp.log").write_text(
         ("[xApp]: Successfully subscribed\n" * 4) +
         ("[xApp]: E42 SUBSCRIPTION DELETE RESPONSE rx\n" * 4) +
@@ -103,6 +103,8 @@ def test_archive_is_immutable_and_export_splits_by_execution(tmp_path):
     metadata = json.loads((first / schema.EXECUTION_METADATA).read_text())
     assert metadata["include_raw_logs"] is True
     assert metadata["quality"]["channel_state_verified"] is True
+    assert metadata["quality"]["radio_clock_valid"] is True
+    assert metadata["quality"]["radio_clock"] == "dual"
     records = dataset.list_executions(tmp_path)
     dataset.update_annotations(
         records[0], include=True, tags="calibration, awgn", notes="clean run")

@@ -65,6 +65,8 @@ def _capture_inventory(run_dir: Path, features: pd.DataFrame,
     subscriptions = int(xapp.get("subscriptions", 0))
     radio_status = "Captured" if quality.get("radio_rows", 0) else (
         "Not requested" if not expected_subscriptions else "Missing")
+    if quality.get("radio_rows", 0) and not quality.get("radio_clock_valid", False):
+        radio_status = "Invalid legacy clock"
     if quality.get("channel_schedule_enabled"):
         channel_status = ("Verified" if quality.get("channel_state_verified")
                           else "Missing / failed")
@@ -88,7 +90,10 @@ def _capture_inventory(run_dir: Path, features: pd.DataFrame,
             "details": (
                 f"subscriptions {subscriptions}/{expected_subscriptions}; "
                 f"clean shutdown: {'yes' if xapp.get('clean_shutdown') else 'no'}; "
-                f"errors: {int(xapp.get('errors', 0))}"
+                f"errors: {int(xapp.get('errors', 0))}; "
+                f"clock: {quality.get('radio_clock', 'unknown')}; "
+                f"source/wall ratio: "
+                f"{quality.get('source_wall_ratio') if quality.get('source_wall_ratio') is not None else 'n/a'}"
             ),
         },
         {
@@ -154,6 +159,9 @@ def _render_latest_capture(run_dir: Path):
     if xapp.get("expected_subscriptions") and (
             not xapp.get("clean_shutdown") or xapp.get("errors")):
         issues.append("the xApp capture was not clean")
+    if (xapp.get("expected_subscriptions") and
+            not quality.get("radio_clock_valid", False)):
+        issues.append("radio rows lack a verified core receipt clock")
     if (quality.get("channel_schedule_enabled") and
             not quality.get("channel_state_verified")):
         issues.append("the requested channel schedule was not fully verified")
@@ -237,6 +245,7 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
             "UE coverage": f"{quality.get('measured_ues', 0)}/{quality.get('expected_ues', 0)}",
             "feature rows": quality.get("feature_rows", 0),
             "radio rows": quality.get("radio_rows", 0),
+            "radio clock": quality.get("radio_clock", "legacy / unknown"),
             "channel labels": channel_labels,
             "xApp clean": xapp.get("clean_shutdown", False),
             "tags": ", ".join(annotations.get("tags") or []),
@@ -246,7 +255,8 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
     catalog = st.data_editor(
         pd.DataFrame(table), hide_index=True, width="stretch",
         disabled=["execution", "profile", "UE coverage", "feature rows",
-                  "radio rows", "channel labels", "xApp clean", "archived"],
+                  "radio rows", "radio clock", "channel labels", "xApp clean",
+                  "archived"],
         column_config={
             "include": st.column_config.CheckboxColumn(
                 "Include", help="Include this complete execution in the next export"),

@@ -54,9 +54,12 @@ traffic_profiles/run_<id>/
 Ports stay shared by direction (UL 5000, DL 5001); flow IDs distinguish UE,
 application, direction, and batch.
 
-`run_timing.json` anchors each node's MGEN wall clock to epoch time. MGEN
-throughput and FlexRIC PRB are joined on `(utc_second, ue)`, never on two
-independently-normalized timelines.
+`run_timing.json` anchors each node's MGEN wall clock to epoch time. FlexRIC
+radio rows retain both the RFsim/service-model source timestamp and the core
+receipt timestamp. `utc_second` is derived only from receipt time, so MGEN
+throughput and PRB are joined on `(utc_second, ue)` without treating simulated
+radio time as UTC. Legacy single-clock PRB captures are visible as invalid but
+cannot be archived or exported into a training dataset.
 
 `run_profile.json` is written when the experiment is launched. It snapshots the
 deployment type and measurement capabilities used for that run, so changing
@@ -129,3 +132,5 @@ by the runner and then builds `observed_kpis.parquet`.
   contains a successful `logs/channel_state.json`.
 - The xApp should run in a bounded window because raw `MAC_UE` data is roughly
   1 kHz per attached UE. The runner aggregates on the core before transfer.
+  Counter deltas whose receipt interval is outside 0.5–1.5 seconds are excluded
+  from one-second bits/PRB joins and reported in Results.

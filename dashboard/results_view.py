@@ -290,14 +290,22 @@ def render(run_dir):
         except (OSError, ValueError, pd.errors.ParserError) as exc:
             st.warning(f"PRB data could not be loaded: {exc}")
         if prb_data.empty:
-            st.warning("PRB collection belongs to this run profile, but no usable "
-                       "logs/prb_by_second.csv rows were found.")
+            reason = prb_data.attrs.get(
+                "error", "no usable logs/prb_by_second.csv rows were found")
+            st.warning(
+                "PRB collection belongs to this run profile, but it is unavailable: "
+                f"{reason}.")
     if capabilities.get("prb") and not prb_data.empty:
         st.markdown("#### Radio resources")
         mapped = int(prb_data.get("mapped", prb_data["ue"].notna()).sum())
+        ratio = prb_data.attrs.get("source_wall_ratio")
+        ratio_text = f"{ratio:.3f}" if ratio is not None else "n/a"
         st.caption(
             f"Mapped PRB rows: {mapped}/{len(prb_data)}; "
-            f"counter-reset boundaries dropped: {prb_data.attrs.get('epoch_boundaries', 0)}.")
+            f"counter-reset boundaries dropped: {prb_data.attrs.get('epoch_boundaries', 0)}; "
+            f"irregular receipt intervals dropped: "
+            f"{prb_data.attrs.get('irregular_intervals', 0)}; "
+            f"RFsim/source-to-wall span ratio: {ratio_text}.")
         available = sorted(prb_data["ue"].dropna().astype(str).unique())
         defaults = available[:min(4, len(available))]
         selected = st.multiselect("UEs shown in radio charts", available,
