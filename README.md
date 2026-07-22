@@ -26,6 +26,7 @@ traffic_profiles/run_<id>/
   run_profile.json
   designed_kpis.parquet
   observed_kpis.parquet
+  channel_schedule.json       # optional, authored before deployment
   mgen_scripts/
     manifest.csv
     flow_batch_map.csv
@@ -41,6 +42,12 @@ traffic_profiles/run_<id>/
     xapp.log
     dn_*_*.log
     ue*_*_*.log
+  executions/
+    mgen-<timestamp>/          # immutable snapshot of one real deployment
+      metadata.json
+      ue_second_features.parquet
+      observed_kpis.parquet
+      logs/                    # timing, mapping, xApp, PRB, channel provenance
 ```
 
 `flow_batch_map.csv` is the authoritative packet-attribution key after UPF NAT.
@@ -75,9 +82,14 @@ Set `profiles_dir` in `dashboard_config.yaml`, then use:
   give every cell its own class distribution or named traffic profiles before
   writing `scenario_config.yaml` for the notebook pipeline;
 - **Testbed** to enter the current core/cell POWDER hostnames;
+- **Channel** to declare a boot-model expectation and schedule verified,
+  per-UE downlink or per-cell uplink parameter changes on the traffic clock;
 - **Results** to run the configured experiment, validate collected logs,
   rebuild KPIs, and view only the KPI sections supported by that run's saved
-  deployment profile.
+  deployment profile;
+- **Dataset** to archive each execution and export selected executions as
+  model-ready Parquet tables. Train/validation/test assignment is by execution
+  ID, which prevents seconds from the same run leaking across splits.
 
 ## CLI
 
@@ -85,11 +97,16 @@ Set `profiles_dir` in `dashboard_config.yaml`, then use:
 python -m twindash.cli list
 python -m twindash.cli preflight <run_name>
 python -m twindash.cli deploy <run_name>
+python -m twindash.cli deploy <run_name> --include-raw
+python -m twindash.cli archive <run_name>
+python -m twindash.cli dataset <dataset_name> \
+  --execution mgen-<timestamp> [--execution mgen-<timestamp> ...]
 python -m twindash.cli fetch <run_name>
 python -m twindash.cli kpis <run_name>
 ```
 
-`preflight` is local and side-effect free. `deploy` runs the remote experiment.
+`preflight` is local and side-effect free. `deploy` runs the remote experiment,
+rebuilds flow KPIs, and immediately creates an immutable execution archive.
 For the distributed profile, `fetch` verifies the artifacts already collected
 by the runner and then builds `observed_kpis.parquet`.
 
@@ -99,8 +116,10 @@ by the runner and then builds `observed_kpis.parquet`.
 - Cross-node one-way latency requires synchronized clocks; request-response RTT
   derived on one UE does not.
 - `rnti_map.csv` is a per-run snapshot. Never reuse it after UE reattachment.
-- RIC5G supports live per-UE channel changes, but exact settings are displayed
-  only when the run contains `logs/channel_state.json`. Capability alone is not
-  treated as proof of which impairment value was active.
+- RIC5G channel family (`AWGN`, `TDL_*`, and similar) is selected at boot. The
+  runtime schedule changes only readable numeric parameters. Every transition
+  is read back; a missing verification fails deployment rather than producing
+  an incorrect training label. Exact settings are displayed only when the run
+  contains a successful `logs/channel_state.json`.
 - The xApp should run in a bounded window because raw `MAC_UE` data is roughly
   1 kHz per attached UE. The runner aggregates on the core before transfer.

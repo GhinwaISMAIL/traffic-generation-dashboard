@@ -39,3 +39,8 @@ def scenario_config_path() -> Path:
 def artifacts_dir() -> Path:
     """artifacts/<app>/{downlink,uplink}/ — source of the discoverable apps."""
     return repo_root() / "artifacts"
+
+
+def datasets_dir() -> Path:
+    """Versioned dataset exports, kept outside individual traffic profiles."""
+    return repo_root() / "datasets"

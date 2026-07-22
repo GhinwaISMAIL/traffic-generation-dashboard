@@ -11,7 +11,7 @@ A calibration sweep is then just a shell loop:
 import argparse
 from pathlib import Path
 
-from . import runs, kpis, ric5g, testbed, schema, settings
+from . import dataset, runs, kpis, ric5g, testbed, schema, settings
 
 
 def _profiles():
@@ -44,6 +44,27 @@ def cmd_kpis(args):
 def cmd_deploy(args):
     cfg = testbed.load_testbed_config()
     print("deployment log:", testbed.run_experiment(_dir(args.run), cfg))
+    print("wrote", kpis.save_observed(_dir(args.run)))
+    print("archived", dataset.archive_execution(
+        _dir(args.run), include_raw=args.include_raw))
+
+
+def cmd_archive(args):
+    print("archived", dataset.archive_execution(
+        _dir(args.run), include_raw=args.include_raw))
+
+
+def cmd_dataset(args):
+    records = dataset.list_executions(_profiles())
+    selected = records
+    if args.execution:
+        wanted = set(args.execution)
+        selected = [record for record in records if record.execution_id in wanted]
+        missing = wanted - {record.execution_id for record in selected}
+        if missing:
+            raise SystemExit("unknown execution(s): " + ", ".join(sorted(missing)))
+    print("exported", dataset.export(
+        selected, settings.datasets_dir() / args.name, include_csv=args.csv))
 
 
 def cmd_preflight(args):
@@ -64,8 +85,24 @@ def main():
     p.set_defaults(func=cmd_list)
 
     for name, fn in (("fetch", cmd_fetch), ("kpis", cmd_kpis),
-                     ("preflight", cmd_preflight), ("deploy", cmd_deploy)):
+                     ("preflight", cmd_preflight)):
         p = sub.add_parser(name); p.add_argument("run"); p.set_defaults(func=fn)
+
+    p = sub.add_parser("deploy")
+    p.add_argument("run")
+    p.add_argument("--include-raw", action="store_true")
+    p.set_defaults(func=cmd_deploy)
+
+    p = sub.add_parser("archive")
+    p.add_argument("run")
+    p.add_argument("--include-raw", action="store_true")
+    p.set_defaults(func=cmd_archive)
+
+    p = sub.add_parser("dataset")
+    p.add_argument("name")
+    p.add_argument("--execution", action="append")
+    p.add_argument("--csv", action="store_true")
+    p.set_defaults(func=cmd_dataset)
 
     args = ap.parse_args()
     args.func(args)

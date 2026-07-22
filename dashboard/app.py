@@ -18,14 +18,14 @@ import streamlit as st
 import yaml
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from twindash import (bursts, kpis, realized, ric5g, runs, scenario, settings,
-                      testbed, testbed_cfg)  # noqa: E402
-from dashboard import results_view  # noqa: E402
+from twindash import (bursts, dataset, kpis, realized, ric5g, runs, scenario,
+                      settings, testbed, testbed_cfg)  # noqa: E402
+from dashboard import channel_view, dataset_view, results_view  # noqa: E402
 
 PROFILES = settings.profiles_dir()
 
 st.set_page_config(page_title="twindash", layout="wide")
-page = st.sidebar.radio("Page", ["Results", "Design", "Testbed"])
+page = st.sidebar.radio("Page", ["Results", "Design", "Channel", "Dataset", "Testbed"])
 
 
 if page == "Results":
@@ -52,7 +52,8 @@ if page == "Results":
             with st.spinner("Running the configured experiment on POWDER…"):
                 testbed.run_experiment(run_dir, active_testbed)
                 kpis.save_observed(run_dir)
-            st.success("Experiment completed and KPIs were rebuilt.")
+                archived = dataset.archive_execution(run_dir)
+            st.success(f"Experiment completed; KPIs and {archived.name} were archived.")
         except Exception as exc:
             st.error(f"Experiment failed: {exc}")
     fetch_label = "Verify collected logs" if distributed else "Fetch logs from testbed"
@@ -73,6 +74,22 @@ if page == "Results":
             st.error(f"KPI rebuild failed: {exc}")
 
     results_view.render(run_dir)
+
+elif page in {"Channel", "Dataset"}:
+    found = runs.list_runs(PROFILES)
+    if not found:
+        st.info("No runs under traffic_profiles/ yet.")
+        st.stop()
+    run = st.sidebar.selectbox("Run", [r.name for r in found])
+    run_dir = Path(PROFILES) / run
+    if page == "Channel":
+        try:
+            active_testbed = testbed.load_testbed_config()
+        except (FileNotFoundError, TypeError, yaml.YAMLError):
+            active_testbed = {}
+        channel_view.render(run_dir, active_testbed)
+    else:
+        dataset_view.render(run_dir, Path(PROFILES))
 
 elif page == "Design":
     st.title("Design a scenario")

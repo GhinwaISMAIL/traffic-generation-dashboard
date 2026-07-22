@@ -8,12 +8,18 @@ traffic_profiles/run_<id>/
     observed_kpis.parquet  # built after a run from the logs
     mgen_scripts/          # the .mgn files
     logs/                  # raw dn + ue logs pulled back from the testbed
+    channel_schedule.json  # optional verified runtime impairment timeline
+    executions/<id>/       # immutable archive of one real deployment
 """
 
 CONFIG = "config.json"
 RUN_PROFILE = "run_profile.json"
 DESIGNED_KPIS = "designed_kpis.parquet"
 OBSERVED_KPIS = "observed_kpis.parquet"
+CHANNEL_SCHEDULE = "channel_schedule.json"
+EXECUTIONS_DIR = "executions"
+EXECUTION_METADATA = "metadata.json"
+UE_SECOND_FEATURES = "ue_second_features.parquet"
 LOGS_DIR = "logs"
 SCRIPTS_DIR = "mgen_scripts"
 

@@ -151,6 +151,14 @@ def expected_logs(run_dir, cfg: dict) -> set[str]:
         expected.update({f"{ue}_ul_tx.log", f"{ue}_dl_rx.log"})
     if (cfg.get("xapp") or {}).get("enabled", True):
         expected.update({"prb_by_second.csv", "xapp.log"})
+    schedule = Path(run_dir) / schema.CHANNEL_SCHEDULE
+    if schedule.exists():
+        try:
+            if json.loads(schedule.read_text()).get("enabled", True):
+                expected.add("channel_state.json")
+        except (OSError, ValueError, json.JSONDecodeError):
+            # The runner will report the malformed schedule more precisely.
+            expected.add("channel_state.json")
     return expected
 
 
