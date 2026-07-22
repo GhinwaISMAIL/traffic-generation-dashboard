@@ -87,9 +87,11 @@ Set `profiles_dir` in `dashboard_config.yaml`, then use:
 - **Results** to run the configured experiment, validate collected logs,
   rebuild KPIs, and view only the KPI sections supported by that run's saved
   deployment profile;
-- **Dataset** to archive each execution and export selected executions as
-  model-ready Parquet tables. Train/validation/test assignment is by execution
-  ID, which prevents seconds from the same run leaking across splits.
+- **Dataset** to inspect the latest capture's UE coverage, flow/radio/channel
+  row counts, provenance, feature completeness, and sample training rows before
+  archiving it; curated executions can then be exported as model-ready Parquet
+  tables. Train/validation/test assignment is by execution ID, which prevents
+  seconds from the same run leaking across splits.
 
 The sidebar follows the run lifecycle: **Design → Testbed → Results → Dataset**.
 Channel control is intentionally part of Testbed rather than a separate page,
