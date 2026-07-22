@@ -22,9 +22,10 @@ def _rows(value: dict) -> pd.DataFrame:
 
 
 def render(run_dir: Path, cfg: dict) -> None:
-    st.title("Channel schedule")
+    st.markdown("#### Channel schedule")
     st.caption(
-        "Define RFsim impairments before deployment. Transitions run on the "
+        "Define RFsim impairments for this generated run before deployment. "
+        "Transitions run on the "
         "traffic clock, are read back from the live model, and are saved in "
         "logs/channel_state.json for dataset labels.")
     if not ric5g.is_config(cfg):

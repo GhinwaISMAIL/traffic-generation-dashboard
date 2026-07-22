@@ -81,15 +81,19 @@ Set `profiles_dir` in `dashboard_config.yaml`, then use:
 - **Design** to choose 1–3 cells, set the common UEs-per-cell reservation, and
   give every cell its own class distribution or named traffic profiles before
   writing `scenario_config.yaml` for the notebook pipeline;
-- **Testbed** to enter the current core/cell POWDER hostnames;
-- **Channel** to declare a boot-model expectation and schedule verified,
-  per-UE downlink or per-cell uplink parameter changes on the traffic clock;
+- **Testbed** to enter the current core/cell POWDER hostnames and, only for the
+  RIC5G profile, declare a boot-model expectation and schedule verified per-UE
+  downlink or per-cell uplink parameter changes on the traffic clock;
 - **Results** to run the configured experiment, validate collected logs,
   rebuild KPIs, and view only the KPI sections supported by that run's saved
   deployment profile;
 - **Dataset** to archive each execution and export selected executions as
   model-ready Parquet tables. Train/validation/test assignment is by execution
   ID, which prevents seconds from the same run leaking across splits.
+
+The sidebar follows the run lifecycle: **Design → Testbed → Results → Dataset**.
+Channel control is intentionally part of Testbed rather than a separate page,
+because only the RIC5G distributed profile supports it.
 
 ## CLI
 

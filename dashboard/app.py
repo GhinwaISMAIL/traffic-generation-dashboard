@@ -2,9 +2,12 @@
 
     streamlit run dashboard/app.py
 
-Results page  — pick a run, see projected -> sent -> received, loss, latency.
 Design page   — edit scenario_config.yaml from a form (writes the file; you
                 still run the notebook pipeline and deploy yourself).
+Testbed page  — configure deployment hosts and, for RIC5G, the runtime channel
+                schedule for a generated run.
+Results page  — pick a run, see projected -> sent -> received, loss, latency.
+Dataset page  — archive and export completed executions for model training.
 
 It never SSHes on its own except the explicit "Fetch logs" button, which calls
 the same twindash.testbed.fetch_logs the CLI uses.
@@ -25,7 +28,7 @@ from dashboard import channel_view, dataset_view, results_view  # noqa: E402
 PROFILES = settings.profiles_dir()
 
 st.set_page_config(page_title="twindash", layout="wide")
-page = st.sidebar.radio("Page", ["Results", "Design", "Channel", "Dataset", "Testbed"])
+page = st.sidebar.radio("Page", ["Design", "Testbed", "Results", "Dataset"])
 
 
 if page == "Results":
@@ -75,21 +78,14 @@ if page == "Results":
 
     results_view.render(run_dir)
 
-elif page in {"Channel", "Dataset"}:
+elif page == "Dataset":
     found = runs.list_runs(PROFILES)
     if not found:
         st.info("No runs under traffic_profiles/ yet.")
         st.stop()
     run = st.sidebar.selectbox("Run", [r.name for r in found])
     run_dir = Path(PROFILES) / run
-    if page == "Channel":
-        try:
-            active_testbed = testbed.load_testbed_config()
-        except (FileNotFoundError, TypeError, yaml.YAMLError):
-            active_testbed = {}
-        channel_view.render(run_dir, active_testbed)
-    else:
-        dataset_view.render(run_dir, Path(PROFILES))
+    dataset_view.render(run_dir, Path(PROFILES))
 
 elif page == "Design":
     st.title("Design a scenario")
@@ -458,3 +454,22 @@ else:  # Testbed
     if st.button("Write testbed_config.yaml", disabled=bool(errs)):
         p = testbed_cfg.save(cfg)
         st.success(f"Wrote {p}  (backup at {p.with_suffix('.yaml.bak')}).")
+
+    if kind == "ric5g":
+        st.divider()
+        st.subheader("Runtime channel control")
+        st.caption(
+            "This section belongs to the RIC5G workflow because RFsim runtime "
+            "channel control is not available on the other testbed profiles. "
+            "Choose the generated traffic run whose channel transitions should "
+            "be applied during its next deployment.")
+        found = runs.list_runs(PROFILES)
+        if not found:
+            st.info(
+                "No generated runs are available yet. Complete Design and rerun "
+                "the notebook pipeline; the channel editor will appear here.")
+        else:
+            run_name = st.selectbox(
+                "Generated run", [item.name for item in found],
+                key="testbed_channel_run")
+            channel_view.render(Path(PROFILES) / run_name, cfg)
