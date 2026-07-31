@@ -7,6 +7,8 @@ artifacts that the dashboard consumes afterwards.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import subprocess
@@ -108,7 +110,29 @@ def environment(cfg: dict) -> dict[str, str]:
     return env
 
 
-def run(run_dir, cfg: dict):
+@contextmanager
+def _deployment_lock(logs: Path):
+    """Allow only one deployment process to own a run at a time."""
+    target = logs / "deployment.lock"
+    stream = target.open("a+")
+    try:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError(
+                "this run is already being deployed by another dashboard "
+                "session or CLI process") from None
+        stream.seek(0)
+        stream.truncate()
+        stream.write(json.dumps({"pid": os.getpid()}) + "\n")
+        stream.flush()
+        yield
+    finally:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        stream.close()
+
+
+def run(run_dir, cfg: dict, *, on_success=None):
     """Run the distributed experiment synchronously and tee output to the run.
 
     Streamlit can call this under a spinner; the CLI streams the same lines to
@@ -126,7 +150,7 @@ def run(run_dir, cfg: dict):
     child_env = os.environ.copy()
     child_env.update(environment(cfg))
 
-    with deployment_log.open("w") as output:
+    with _deployment_lock(logs), deployment_log.open("w") as output:
         process = subprocess.Popen(
             cmd, cwd=settings.repo_root(), env=child_env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -137,8 +161,10 @@ def run(run_dir, cfg: dict):
             output.write(line)
             output.flush()
         rc = process.wait()
-    if rc:
-        raise subprocess.CalledProcessError(rc, cmd)
+        if rc:
+            raise subprocess.CalledProcessError(rc, cmd)
+        if on_success is not None:
+            on_success()
     return deployment_log
 
 

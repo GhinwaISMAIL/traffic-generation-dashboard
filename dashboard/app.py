@@ -9,8 +9,8 @@ Testbed page  — configure deployment hosts and, for RIC5G, the runtime channel
 Results page  — pick a run, see projected -> sent -> received, loss, latency.
 Dataset page  — archive and export completed executions for model training.
 
-It never SSHes on its own except the explicit "Fetch logs" button, which calls
-the same twindash.testbed.fetch_logs the CLI uses.
+Remote actions only run after an explicit Run or Fetch button press. They use
+the same twindash.testbed adapters as the CLI.
 """
 import copy
 import sys
@@ -53,10 +53,11 @@ if page == "Results":
                  help="Uses the profile and hosts currently saved on the Testbed page"):
         try:
             with st.spinner("Running the configured experiment on POWDER…"):
-                testbed.run_experiment(run_dir, active_testbed)
-                kpis.save_observed(run_dir)
-                archived = dataset.archive_execution(run_dir)
-            st.success(f"Experiment completed; KPIs and {archived.name} were archived.")
+                _, _, archived = testbed.run_and_archive(
+                    run_dir, active_testbed, include_raw=True)
+            st.success(
+                "Experiment completed; raw MGEN event logs, KPIs, and "
+                f"{archived.name} were archived before the run lock was released.")
         except Exception as exc:
             st.error(f"Experiment failed: {exc}")
     fetch_label = "Verify collected logs" if distributed else "Fetch logs from testbed"
@@ -180,7 +181,7 @@ elif page == "Design":
                 prof_df = pd.DataFrame(
                     rows, columns=["name", "count", "base", "flows"] + apps)
                 edited = st.data_editor(
-                    prof_df, num_rows="dynamic", use_container_width=True,
+                    prof_df, num_rows="dynamic", width="stretch",
                     hide_index=True,
                     column_config={
                         "name": st.column_config.TextColumn("name"),

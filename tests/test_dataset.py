@@ -1,6 +1,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 from twindash import dataset, schema
 
@@ -97,6 +98,7 @@ def test_archive_is_immutable_and_export_splits_by_execution(tmp_path):
     first = dataset.archive_execution(run)
     second = dataset.archive_execution(run)
     assert first == second
+    assert dataset.verify_checksums(first) > 0
     assert (first / schema.UE_SECOND_FEATURES).exists()
     dataset.archive_execution(run, include_raw=True)
     assert (first / "raw_mgen_logs.tar.gz").exists()
@@ -115,5 +117,43 @@ def test_archive_is_immutable_and_export_splits_by_execution(tmp_path):
     assert set(features["execution_id"]) == {"mgen-20260722-120000"}
     assert (target / "ue_second_features.csv").exists()
     exported = json.loads((target / "dataset_manifest.json").read_text())
+    assert exported["archive_checksums_verified"] is True
     assert exported["executions"][0]["annotations"]["tags"] == [
         "calibration", "awgn"]
+
+
+def test_export_rejects_tampered_archive_without_partial_output(tmp_path):
+    run = sample_run(tmp_path)
+    archive = dataset.archive_execution(run)
+    features = archive / schema.UE_SECOND_FEATURES
+    features.write_bytes(features.read_bytes() + b"tampered")
+
+    target = tmp_path / "datasets" / "tampered"
+    with pytest.raises(ValueError, match="archive checksum mismatch"):
+        dataset.export(dataset.list_executions(tmp_path), target)
+
+    assert not target.exists()
+    assert not target.with_name(f".{target.name}.tmp").exists()
+
+
+def test_export_rejects_unexpected_archive_file(tmp_path):
+    run = sample_run(tmp_path)
+    archive = dataset.archive_execution(run)
+    (archive / "untracked.txt").write_text("not checksummed")
+
+    with pytest.raises(ValueError, match="unexpected"):
+        dataset.export(
+            dataset.list_executions(tmp_path),
+            tmp_path / "datasets" / "untracked")
+
+
+def test_nested_checksum_control_names_are_not_excluded(tmp_path):
+    archive = dataset.archive_execution(sample_run(tmp_path))
+    nested = archive / "logs" / "annotations.json"
+    nested.write_text("nested measurement metadata")
+
+    dataset._write_checksums(archive)
+
+    manifest = json.loads((archive / "SHA256SUMS.json").read_text())
+    assert "logs/annotations.json" in manifest
+    assert dataset.verify_checksums(archive) == len(manifest)

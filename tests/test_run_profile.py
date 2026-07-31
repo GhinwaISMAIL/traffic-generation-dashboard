@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from twindash import run_profile, testbed, testbed_cfg
 
@@ -80,3 +81,29 @@ def test_run_dispatch_records_profile_used_at_that_time(tmp_path, monkeypatch):
 
     # Changing the global config later cannot reinterpret this historical run.
     assert run_profile.load(run)["testbed"] == run_profile.RFSIM
+
+
+def test_run_and_archive_freezes_raw_logs_by_default(tmp_path, monkeypatch):
+    run = tmp_path / "run_archive"
+    (run / "deployment").mkdir(parents=True)
+    cfg = {"testbed": run_profile.RFSIM, "ues": {"boxes": {"ue1": {}}}}
+    observed = run / "observed_kpis.parquet"
+    archive = run / "executions" / "mgen-test"
+    calls = []
+
+    monkeypatch.setattr(testbed, "run_script", lambda path: "ran")
+    monkeypatch.setattr(
+        testbed.kpis, "save_observed",
+        lambda path: calls.append(("kpis", Path(path))) or observed)
+
+    def fake_archive(path, *, include_raw=False):
+        calls.append(("archive", Path(path), include_raw))
+        return archive
+
+    monkeypatch.setattr(testbed.dataset, "archive_execution", fake_archive)
+
+    assert testbed.run_and_archive(run, cfg) == ("ran", observed, archive)
+    assert calls == [
+        ("kpis", run),
+        ("archive", run, True),
+    ]

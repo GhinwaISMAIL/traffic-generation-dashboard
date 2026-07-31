@@ -79,6 +79,7 @@ def test_throughput_and_prb_join_on_absolute_second_and_direction(tmp_path):
 
     efficiency = prb.efficiency(run)
     assert set(efficiency["direction"]) == {"dl", "ul"}
+    assert efficiency["bits_per_prb"].dtype.kind == "f"
     dl = efficiency[(efficiency["ue"] == "ue1") &
                     (efficiency["direction"] == "dl")].iloc[0]
     ul = efficiency[(efficiency["ue"] == "ue13") &

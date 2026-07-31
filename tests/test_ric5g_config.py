@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from twindash import ric5g, testbed_cfg
 
 
@@ -103,3 +105,56 @@ def test_local_contract_rejects_xapp_window_after_traffic(tmp_path):
     cfg["xapp"].update({"delay_s": 45, "window_s": 30})
     errors = ric5g.validate_local(run, cfg)
     assert any("after the 60s traffic run" in error for error in errors)
+
+
+def test_same_run_cannot_be_deployed_twice(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+
+    with ric5g._deployment_lock(logs):
+        with pytest.raises(RuntimeError, match="already being deployed"):
+            with ric5g._deployment_lock(logs):
+                pass
+
+
+def test_success_callback_runs_before_deployment_lock_is_released(
+        tmp_path, monkeypatch):
+    run = tmp_path / "run_locked_archive"
+    scripts = run / "mgen_scripts"
+    scripts.mkdir(parents=True)
+    (run / "config.json").write_text(
+        json.dumps({"simulation_duration": 100}))
+    for name in ("dn_dl_tx.mgn", "dn_ul_rx.mgn", "flow_batch_map.csv",
+                 "ue1_ul_tx.mgn", "ue1_dl_rx.mgn"):
+        (scripts / name).write_text("")
+
+    runner = tmp_path / "deploy.sh"
+    runner.write_text("#!/usr/bin/env bash\n")
+    cfg = config(n_ue=1, n_cells=1)
+    cfg["runner"]["script"] = str(runner)
+    cfg["xapp"].update({"delay_s": 20, "window_s": 60})
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = iter(["finished\n"])
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        ric5g.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    callback_calls = []
+
+    def assert_lock_is_still_held():
+        callback_calls.append(True)
+        with pytest.raises(RuntimeError, match="already being deployed"):
+            with ric5g._deployment_lock(run / "logs"):
+                pass
+
+    result = ric5g.run(run, cfg, on_success=assert_lock_is_still_held)
+
+    assert result == run / "logs" / "deployment.log"
+    assert callback_calls == [True]
+    # The callback completed and the outer run then released the lock.
+    with ric5g._deployment_lock(run / "logs"):
+        pass

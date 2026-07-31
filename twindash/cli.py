@@ -43,10 +43,11 @@ def cmd_kpis(args):
 
 def cmd_deploy(args):
     cfg = testbed.load_testbed_config()
-    print("deployment log:", testbed.run_experiment(_dir(args.run), cfg))
-    print("wrote", kpis.save_observed(_dir(args.run)))
-    print("archived", dataset.archive_execution(
-        _dir(args.run), include_raw=args.include_raw))
+    deployment, observed, archived = testbed.run_and_archive(
+        _dir(args.run), cfg, include_raw=True)
+    print("deployment log:", deployment)
+    print("wrote", observed)
+    print("archived raw MGEN event logs and KPIs:", archived)
 
 
 def cmd_archive(args):
@@ -90,7 +91,9 @@ def main():
 
     p = sub.add_parser("deploy")
     p.add_argument("run")
-    p.add_argument("--include-raw", action="store_true")
+    # Kept so older scripts remain compatible. Successful deployments now
+    # always freeze raw MGEN event logs before another run can overwrite them.
+    p.add_argument("--include-raw", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_deploy)
 
     p = sub.add_parser("archive")

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from . import ric5g, run_profile, schema, settings
+from . import dataset, kpis, ric5g, run_profile, schema, settings
 
 
 def load_testbed_config(path=None):
@@ -99,11 +99,39 @@ def run_script(path):
     return _run(["bash", str(path)])
 
 
-def run_experiment(run_dir, cfg):
-    """Dispatch to the topology-specific, validated execution path."""
+def _dispatch_experiment(run_dir, cfg, *, on_success=None):
+    """Dispatch a run and optionally freeze its outputs before ownership ends."""
     # testbed_config.yaml describes the next run and can change afterwards.
     # Snapshot it before dispatch so Results never depends on today's selection.
     run_profile.record(run_dir, cfg, overwrite=True)
     if ric5g.is_config(cfg):
-        return ric5g.run(run_dir, cfg)
-    return run_script(Path(run_dir) / "deployment" / "dn_commands.sh")
+        return ric5g.run(run_dir, cfg, on_success=on_success)
+    result = run_script(Path(run_dir) / "deployment" / "dn_commands.sh")
+    if on_success is not None:
+        on_success()
+    return result
+
+
+def run_experiment(run_dir, cfg):
+    """Dispatch to the topology-specific, validated execution path."""
+    return _dispatch_experiment(run_dir, cfg)
+
+
+def run_and_archive(run_dir, cfg, *, include_raw=True):
+    """Run once, build KPIs, and freeze an immutable execution archive.
+
+    For the distributed RIC5G path the success callback runs while the
+    deployment lock is still held. A second dashboard/CLI invocation cannot
+    overwrite mutable ``logs/`` before its raw MGEN events enter the archive.
+    """
+    run_dir = Path(run_dir)
+    frozen = {}
+
+    def freeze_outputs():
+        frozen["observed"] = kpis.save_observed(run_dir)
+        frozen["archive"] = dataset.archive_execution(
+            run_dir, include_raw=include_raw)
+
+    deployment = _dispatch_experiment(
+        run_dir, cfg, on_success=freeze_outputs)
+    return deployment, frozen["observed"], frozen["archive"]
