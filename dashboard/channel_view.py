@@ -64,7 +64,7 @@ def render(run_dir: Path, cfg: dict) -> None:
         "are DL groups; all_cells/cellN are UL groups.")
     edited = st.data_editor(
         _rows(current), num_rows="dynamic", hide_index=True,
-        use_container_width=True, key=f"channel_{run_dir.name}",
+        width="stretch", key=f"channel_{run_dir.name}",
         column_config={
             "at_s": st.column_config.NumberColumn(
                 "Time after traffic start (s)", min_value=0.0,

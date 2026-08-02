@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import pytest
 
-from twindash import dataset, schema
+from twindash import dataset, dataset_v2, schema
 
 
 def sample_run(tmp_path):
@@ -66,12 +66,14 @@ def sample_run(tmp_path):
         "initial_state": [{
             "target": "ue1", "direction": "dl",
             "parameter": "noise_power_dB", "observed": -30,
-            "model_type": "AWGN", "model_name": "rfsimu_channel_ue0",
+            "model_type": "AWGN", "model_name": "rfsimu_channel_enB0",
+            "model_index": 0,
         }],
         "transitions": [{
             "target": "ue1", "direction": "dl",
             "parameter": "noise_power_dB", "observed": -20,
-            "model_type": "AWGN", "model_name": "rfsimu_channel_ue0",
+            "model_type": "AWGN", "model_name": "rfsimu_channel_enB0",
+            "model_index": 0,
             "applied_epoch": 1_000_010.2, "verified": True,
             "status": "verified",
         }],
@@ -95,15 +97,20 @@ def test_training_frame_joins_radio_traffic_and_verified_channel(tmp_path):
 
 def test_archive_is_immutable_and_export_splits_by_execution(tmp_path):
     run = sample_run(tmp_path)
-    first = dataset.archive_execution(run)
+    first = dataset.archive_execution(run, include_raw=True)
     second = dataset.archive_execution(run)
     assert first == second
     assert dataset.verify_checksums(first) > 0
-    assert (first / schema.UE_SECOND_FEATURES).exists()
-    dataset.archive_execution(run, include_raw=True)
+    assert all((first / name).exists() for name in schema.V2_TABLES)
     assert (first / "raw_mgen_logs.tar.gz").exists()
+    before = (first / "SHA256SUMS.json").read_bytes()
+    dataset.archive_execution(run, include_raw=False)
+    assert (first / "SHA256SUMS.json").read_bytes() == before
     metadata = json.loads((first / schema.EXECUTION_METADATA).read_text())
+    assert metadata["schema_version"] == 2
     assert metadata["include_raw_logs"] is True
+    assert metadata["reconstructable_from_archive"] is True
+    assert metadata["table_rows"][schema.PACKET_OUTCOMES] == 2
     assert metadata["quality"]["channel_state_verified"] is True
     assert metadata["quality"]["radio_clock_valid"] is True
     assert metadata["quality"]["radio_clock"] == "dual"
@@ -112,14 +119,79 @@ def test_archive_is_immutable_and_export_splits_by_execution(tmp_path):
         records[0], include=True, tags="calibration, awgn", notes="clean run")
     target = dataset.export(
         records, tmp_path / "datasets" / "example", include_csv=True)
-    features = pd.read_parquet(target / schema.UE_SECOND_FEATURES)
-    assert features["split"].nunique() == 1
-    assert set(features["execution_id"]) == {"mgen-20260722-120000"}
-    assert (target / "ue_second_features.csv").exists()
-    exported = json.loads((target / "dataset_manifest.json").read_text())
+    packets = pd.read_parquet(target / schema.PACKET_OUTCOMES)
+    assert packets["split"].nunique() == 1
+    assert set(packets["execution_id"]) == {"mgen-20260722-120000"}
+    assert (target / "packet_outcomes.csv").exists()
+    assert (target / schema.MODEL_CONTRACT).exists()
+    assert dataset.verify_checksums(target) > 0
+    exported = json.loads((target / schema.DATASET_MANIFEST).read_text())
     assert exported["archive_checksums_verified"] is True
     assert exported["executions"][0]["annotations"]["tags"] == [
         "calibration", "awgn"]
+
+
+def test_v2_packet_accounting_keys_segments_and_exact_percentile(tmp_path):
+    tables = dataset_v2.build_tables(sample_run(tmp_path))
+    packets = tables[schema.PACKET_OUTCOMES]
+    seconds = tables[schema.UE_APP_SECOND_OBSERVED]
+    segments = tables[schema.CHANNEL_SEGMENTS]
+    training = tables[schema.SEGMENT_TRAINING_TABLE]
+
+    assert len(packets) == 2
+    assert packets["packet_id"].is_unique
+    assert int(packets["received"].sum()) + int(packets["lost"].sum()) == 2
+    second_key = [
+        "execution_id", "ue", "app", "direction", "utc_second",
+    ]
+    assert not seconds.duplicated(second_key).any()
+    assert {"nb_id", "rnti"}.issubset(packets.columns)
+    assert {"nb_id", "rnti", "model_mapping_valid"}.issubset(segments.columns)
+
+    ue1_dl = segments[(segments["ue"] == "ue1") &
+                      (segments["direction"] == "dl")].sort_values(
+                          "segment_start_utc")
+    assert len(ue1_dl) == 2
+    assert ue1_dl.iloc[0]["segment_end_utc"] == pytest.approx(
+        ue1_dl.iloc[1]["segment_start_utc"])
+    assert bool(ue1_dl["model_mapping_valid"].all())
+    ul = segments[segments["direction"] == "ul"].iloc[0]
+    assert not bool(ul["controlled"])
+    assert not bool(ul["training_eligible"])
+
+    treated = training[(training["direction"] == "dl") &
+                       (training["requested_value"] == -20)].iloc[0]
+    expected = packets.loc[
+        (packets["sent_time_utc"] >= treated["segment_start_utc"]) &
+        (packets["sent_time_utc"] < treated["segment_end_utc"]) &
+        packets["received"], "latency_ms"].quantile(.95)
+    assert treated["latency_ms_p95"] == pytest.approx(expected)
+
+
+def test_v2_archive_reconstructs_all_tables_from_frozen_inputs(tmp_path):
+    run = sample_run(tmp_path)
+    archive = dataset.archive_execution(run)
+    assert (archive / schema.LOGS_DIR / "dn_dl_tx.log").exists()
+    assert (archive / schema.SCRIPTS_DIR / "flow_batch_map.csv").exists()
+
+    rebuilt = dataset_v2.build_tables(archive)
+    for name, frame in rebuilt.items():
+        frozen = pd.read_parquet(archive / name)
+        pd.testing.assert_frame_equal(
+            frozen.reset_index(drop=True), frame.reset_index(drop=True),
+            check_dtype=False)
+
+
+def test_v2_export_rejects_schema_v1_archive(tmp_path):
+    archive = dataset.archive_execution(sample_run(tmp_path))
+    metadata_path = archive / schema.EXECUTION_METADATA
+    metadata = json.loads(metadata_path.read_text())
+    metadata["schema_version"] = 1
+    metadata_path.write_text(json.dumps(metadata))
+    dataset._write_checksums(archive)
+
+    with pytest.raises(ValueError, match="V2 export accepts only"):
+        dataset.export(dataset.list_executions(tmp_path), tmp_path / "v1-export")
 
 
 def test_export_rejects_tampered_archive_without_partial_output(tmp_path):

@@ -173,8 +173,10 @@ def efficiency(run_dir, window_s: float = 1.0) -> pd.DataFrame:
         id_vars=["utc_second", "ue"], var_name="direction", value_name="prb")
     resource["direction"] = resource["direction"].str.removesuffix("_prb")
     j = tp.merge(resource, on=["utc_second", "ue", "direction"], how="inner")
+    # A floating NaN keeps this column numeric.  pd.NA promotes it to object
+    # dtype, which Kaleido's orjson serializer rejects during PDF export.
     j["bits_per_prb"] = (
-        j["mbps"] * 1e6 * window_s) / j["prb"].replace(0, pd.NA)
+        j["mbps"] * 1e6 * window_s) / j["prb"].replace(0, float("nan"))
     j["t_s"] = j["utc_second"] - j["utc_second"].min()
     j.attrs.update(prb.attrs)
     return j

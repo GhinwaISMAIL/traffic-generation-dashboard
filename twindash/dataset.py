@@ -20,7 +20,7 @@ import tarfile
 
 import pandas as pd
 
-from . import kpis, prb, run_profile, schema
+from . import dataset_v2, kpis, prb, run_profile, schema
 
 
 CONTROL_LOGS = (
@@ -193,7 +193,7 @@ def training_frame(run_dir) -> pd.DataFrame:
         if f"{direction}_prb" in frame:
             frame[f"{direction}_bits_per_prb"] = (
                 frame[f"{direction}_mbps"] * 1e6 /
-                frame[f"{direction}_prb"].replace(0, pd.NA))
+                frame[f"{direction}_prb"].replace(0, float("nan")))
 
     frame.insert(0, "profile_id", run_dir.name)
     frame.insert(0, "execution_id", execution_id(run_dir))
@@ -280,14 +280,97 @@ def _write_raw_logs(run_dir: Path, destination: Path) -> None:
             archive.add(source, arcname=source.name)
 
 
+def _copy_reconstruction_inputs(run_dir: Path, destination: Path) -> None:
+    """Freeze every regular input needed to rebuild all V2 tables."""
+    for name in (
+            schema.CONFIG, schema.RUN_PROFILE, schema.CHANNEL_SCHEDULE,
+            schema.DESIGNED_KPIS):
+        source = run_dir / name
+        if source.is_file() and not source.is_symlink():
+            shutil.copy2(source, destination / name)
+
+    for directory_name in (schema.SCRIPTS_DIR, schema.LOGS_DIR):
+        source_root = run_dir / directory_name
+        target_root = destination / directory_name
+        target_root.mkdir(parents=True, exist_ok=True)
+        if not source_root.exists():
+            continue
+        for source in sorted(source_root.rglob("*")):
+            if not source.is_file() or source.is_symlink():
+                continue
+            relative = source.relative_to(source_root)
+            target = target_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+
 def _write_checksums(destination: Path) -> None:
     checksums = {}
     for source in sorted(path for path in destination.rglob("*") if path.is_file()):
-        if source.name in {"SHA256SUMS.json", "annotations.json"}:
+        relative = str(source.relative_to(destination))
+        if relative in {"SHA256SUMS.json", "annotations.json"}:
             continue
-        checksums[str(source.relative_to(destination))] = _sha256(source)
+        checksums[relative] = _sha256(source)
     (destination / "SHA256SUMS.json").write_text(
         json.dumps(checksums, indent=2, sort_keys=True) + "\n")
+
+
+def verify_checksums(destination: Path) -> int:
+    """Verify an immutable archive before it is used for dataset export.
+
+    ``annotations.json`` is deliberately excluded because curation remains
+    editable after archival.  Every other regular file must be listed in the
+    manifest and retain its original digest.
+    """
+    destination = Path(destination)
+    manifest_path = destination / "SHA256SUMS.json"
+    checksums = _json(manifest_path)
+    if not isinstance(checksums, dict) or not checksums:
+        raise ValueError(
+            f"archive checksum manifest is missing or invalid: {manifest_path}")
+
+    ignored_root_files = {"SHA256SUMS.json", "annotations.json"}
+    actual_files = set()
+    for source in destination.rglob("*"):
+        if not (source.is_file() or source.is_symlink()):
+            continue
+        relative = str(source.relative_to(destination))
+        if relative not in ignored_root_files:
+            actual_files.add(relative)
+    expected_files = set(checksums)
+    if actual_files != expected_files:
+        missing = sorted(expected_files - actual_files)
+        unexpected = sorted(actual_files - expected_files)
+        details = []
+        if missing:
+            details.append(f"missing={missing}")
+        if unexpected:
+            details.append(f"unexpected={unexpected}")
+        raise ValueError(
+            "archive file set does not match checksum manifest: " +
+            "; ".join(details))
+
+    root = destination.resolve()
+    for relative, expected in checksums.items():
+        relative_path = Path(relative)
+        if (relative_path.is_absolute() or ".." in relative_path.parts or
+                not re.fullmatch(r"[0-9a-f]{64}", str(expected))):
+            raise ValueError(
+                f"archive checksum manifest contains an invalid entry: {relative}")
+        source = destination / relative_path
+        if source.is_symlink():
+            raise ValueError(f"archive contains a symbolic link: {relative}")
+        try:
+            resolved = source.resolve(strict=True)
+            resolved.relative_to(root)
+        except (FileNotFoundError, ValueError):
+            raise ValueError(
+                f"archive checksum path is missing or unsafe: {relative}") from None
+        if not resolved.is_file():
+            raise ValueError(f"archive checksum path is not a file: {relative}")
+        if _sha256(resolved) != expected:
+            raise ValueError(f"archive checksum mismatch: {relative}")
+    return len(checksums)
 
 
 def archive_execution(run_dir, *, include_raw: bool = False) -> Path:
@@ -297,14 +380,7 @@ def archive_execution(run_dir, *, include_raw: bool = False) -> Path:
     root = run_dir / schema.EXECUTIONS_DIR
     destination = root / identifier
     if destination.exists():
-        if include_raw and not (destination / "raw_mgen_logs.tar.gz").exists():
-            _write_raw_logs(run_dir, destination)
-            metadata_path = destination / schema.EXECUTION_METADATA
-            metadata = _json(metadata_path, {}) or {}
-            metadata["include_raw_logs"] = True
-            metadata_path.write_text(json.dumps(
-                metadata, indent=2, sort_keys=True) + "\n")
-            _write_checksums(destination)
+        verify_checksums(destination)
         return destination
 
     root.mkdir(parents=True, exist_ok=True)
@@ -317,29 +393,35 @@ def archive_execution(run_dir, *, include_raw: bool = False) -> Path:
         raise ValueError("no per-second traffic or radio measurements were produced")
     features.to_parquet(temporary / schema.UE_SECOND_FEATURES, index=False)
 
+    tables = dataset_v2.build_tables(run_dir)
+    empty = [name for name, frame in tables.items() if frame.empty]
+    if empty:
+        raise ValueError(f"V2 tables are empty: {empty}")
+    for name, frame in tables.items():
+        frame.to_parquet(temporary / name, index=False)
+
     observed = run_dir / schema.OBSERVED_KPIS
     if not observed.exists():
         kpis.save_observed(run_dir)
     shutil.copy2(observed, temporary / schema.OBSERVED_KPIS)
-    for name in (schema.CONFIG, schema.RUN_PROFILE, schema.CHANNEL_SCHEDULE):
-        source = run_dir / name
-        if source.exists():
-            shutil.copy2(source, temporary / name)
-    for name in CONTROL_LOGS:
-        source = run_dir / schema.LOGS_DIR / name
-        if source.exists():
-            shutil.copy2(source, temporary / schema.LOGS_DIR / name)
+    _copy_reconstruction_inputs(run_dir, temporary)
 
     if include_raw:
         _write_raw_logs(run_dir, temporary)
 
+    (temporary / schema.MODEL_CONTRACT).write_text(
+        json.dumps(dataset_v2.model_contract(), indent=2, sort_keys=True) + "\n")
+
     q = quality(run_dir, features)
     metadata = {
-        "schema_version": 1,
+        "schema_version": schema.SCHEMA_VERSION,
         "execution_id": identifier,
         "profile_id": run_dir.name,
         "archived_at": datetime.now(timezone.utc).isoformat(),
-        "include_raw_logs": bool(include_raw),
+        "include_raw_logs": True,
+        "compressed_raw_log_copy": bool(include_raw),
+        "reconstructable_from_archive": True,
+        "table_rows": {name: int(len(frame)) for name, frame in tables.items()},
         "quality": q,
     }
     (temporary / schema.EXECUTION_METADATA).write_text(
@@ -386,15 +468,19 @@ def _split(identifier: str) -> str:
 def export(records: list[Execution], destination: Path, *, include_csv: bool = False) -> Path:
     if not records:
         raise ValueError("select at least one archived execution")
-    destination = Path(destination)
-    if destination.exists():
-        raise FileExistsError(f"dataset destination already exists: {destination}")
-    temporary = destination.with_name(f".{destination.name}.tmp")
-    if temporary.exists():
-        shutil.rmtree(temporary)
-    temporary.mkdir(parents=True)
-    feature_frames, flow_frames, manifest = [], [], []
+    verified = {}
     for record in records:
+        verified[record.execution_id] = verify_checksums(record.path)
+        if int(record.metadata.get("schema_version", 0)) != schema.SCHEMA_VERSION:
+            raise ValueError(
+                f"{record.execution_id} uses schema version "
+                f"{record.metadata.get('schema_version')}; V2 export accepts only "
+                f"schema version {schema.SCHEMA_VERSION}")
+        missing = [name for name in schema.V2_TABLES
+                   if not (record.path / name).is_file()]
+        if missing:
+            raise ValueError(
+                f"{record.execution_id} is missing V2 tables: {missing}")
         quality_doc = record.metadata.get("quality", {}) or {}
         if (quality_doc.get("radio_rows", 0) and
                 not quality_doc.get("radio_clock_valid", False)):
@@ -402,34 +488,52 @@ def export(records: list[Execution], destination: Path, *, include_csv: bool = F
                 f"{record.execution_id} is a pre-dual-clock radio capture. "
                 "Unselect it or repeat the execution after the FlexRIC receipt-"
                 "timestamp patch; RFsim source time cannot be joined to MGEN UTC")
-        split = _split(record.execution_id)
-        features = pd.read_parquet(record.path / schema.UE_SECOND_FEATURES)
-        features["split"] = split
-        feature_frames.append(features)
-        flows = pd.read_parquet(record.path / schema.OBSERVED_KPIS)
-        flows["execution_id"] = record.execution_id
-        flows["profile_id"] = record.profile_id
-        flows["split"] = split
-        flow_frames.append(flows)
-        manifest.append({
-            "execution_id": record.execution_id,
-            "profile_id": record.profile_id,
-            "split": split,
-            "quality": record.metadata.get("quality", {}),
-            "annotations": annotations(record),
-        })
-    all_features = pd.concat(feature_frames, ignore_index=True)
-    all_flows = pd.concat(flow_frames, ignore_index=True)
-    all_features.to_parquet(temporary / schema.UE_SECOND_FEATURES, index=False)
-    all_flows.to_parquet(temporary / schema.OBSERVED_KPIS, index=False)
-    if include_csv:
-        all_features.to_csv(temporary / "ue_second_features.csv", index=False)
-        all_flows.to_csv(temporary / "observed_kpis.csv", index=False)
-    (temporary / "dataset_manifest.json").write_text(json.dumps({
-        "schema_version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "split_unit": "execution_id",
-        "executions": manifest,
-    }, indent=2, sort_keys=True) + "\n")
-    temporary.replace(destination)
+
+    destination = Path(destination)
+    if destination.exists():
+        raise FileExistsError(f"dataset destination already exists: {destination}")
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    temporary.mkdir(parents=True)
+    try:
+        table_frames = {name: [] for name in schema.V2_TABLES}
+        manifest = []
+        for record in records:
+            split = _split(record.execution_id)
+            for name in schema.V2_TABLES:
+                frame = pd.read_parquet(record.path / name)
+                frame["split"] = split
+                table_frames[name].append(frame)
+            manifest.append({
+                "execution_id": record.execution_id,
+                "profile_id": record.profile_id,
+                "split": split,
+                "archive_files_verified": verified[record.execution_id],
+                "quality": record.metadata.get("quality", {}),
+                "annotations": annotations(record),
+            })
+        table_rows = {}
+        for name, frames in table_frames.items():
+            combined = pd.concat(frames, ignore_index=True)
+            combined.to_parquet(temporary / name, index=False)
+            table_rows[name] = int(len(combined))
+            if include_csv:
+                combined.to_csv(temporary / Path(name).with_suffix(".csv"), index=False)
+        (temporary / schema.MODEL_CONTRACT).write_text(
+            json.dumps(dataset_v2.model_contract(), indent=2, sort_keys=True) + "\n")
+        (temporary / schema.DATASET_MANIFEST).write_text(json.dumps({
+            "schema_version": schema.SCHEMA_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "split_unit": "execution_id",
+            "archive_checksums_verified": True,
+            "table_rows": table_rows,
+            "executions": manifest,
+        }, indent=2, sort_keys=True) + "\n")
+        _write_checksums(temporary)
+        temporary.replace(destination)
+    except Exception:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        raise
     return destination

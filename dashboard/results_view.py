@@ -1,6 +1,6 @@
 """Results page: throughput, delivery quality, and designed-vs-realized charts.
 
-render(run_dir) draws the Plotly figures and PNG export buttons.
+render(run_dir) draws the Plotly figures and vector PDF export buttons.
 """
 from pathlib import Path
 import io
@@ -173,13 +173,14 @@ def _latency_fig(obs):
 def _prb_fig(data, selected):
     fig = go.Figure()
     chosen = data[data["ue"].isin(selected)]
-    for ue in selected:
+    for ue_idx, ue in enumerate(selected):
         rows = chosen[chosen["ue"] == ue]
+        color = _PLOTLY_COLORWAY[ue_idx % len(_PLOTLY_COLORWAY)]
         for direction, dash in (("dl", "solid"), ("ul", "dot")):
             fig.add_scatter(
                 name=f"{ue} {direction.upper()}", x=rows["t_s"],
                 y=rows[f"{direction}_prb"], mode="lines",
-                line=dict(dash=dash),
+                line=dict(dash=dash, color=color),
                 hovertemplate="t=%{x:.0f}s %{y:.0f} PRB<extra>" + ue + " "
                               + direction.upper() + "</extra>")
     return _layout(fig, "PRB consumed during the xApp window", "PRB / s", height=360)
@@ -187,12 +188,22 @@ def _prb_fig(data, selected):
 
 def _efficiency_fig(data, selected):
     fig = go.Figure()
-    chosen = data[data["ue"].isin(selected)]
+    chosen = data[data["ue"].isin(selected)].copy()
+    # Captures created before the numeric PRB fix can contain pd.NA in an
+    # object-dtype column.  Plotly renders those values interactively, but
+    # Kaleido/orjson cannot serialize NAType while exporting PDF.
+    chosen["bits_per_prb"] = pd.to_numeric(
+        chosen["bits_per_prb"], errors="coerce")
+    chosen = chosen.dropna(subset=["t_s", "bits_per_prb"])
+    chosen["bits_per_prb"] = chosen["bits_per_prb"].astype(float)
+    ue_color = {ue: _PLOTLY_COLORWAY[i % len(_PLOTLY_COLORWAY)]
+                for i, ue in enumerate(selected)}
     for (ue, direction), rows in chosen.groupby(["ue", "direction"]):
         fig.add_scatter(
             name=f"{ue} {direction.upper()}", x=rows["t_s"],
             y=rows["bits_per_prb"], mode="lines",
-            line=dict(dash="solid" if direction == "dl" else "dot"),
+            line=dict(dash="solid" if direction == "dl" else "dot",
+                      color=ue_color.get(str(ue), _PLOTLY_COLORWAY[0])),
             hovertemplate="t=%{x:.0f}s %{y:.0f} bits/PRB<extra>"
                           + str(ue) + " " + direction.upper() + "</extra>")
     return _layout(fig, "Application-layer efficiency", "bits / PRB", height=360)
@@ -218,7 +229,13 @@ def _designed_vs_realized_fig(obs, designed):
     return _layout(fig, "Designed vs realized (packets)", "packets")
 
 
-def _png_bytes(fig):
+_PLOTLY_COLORWAY = [
+    "#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A",
+    "#19D3F3", "#FF6692", "#B6E880", "#FF97FF", "#FECB52",
+]
+
+
+def _pdf_bytes(fig):
     export = go.Figure(fig)
     export.update_layout(
         margin=dict(l=70, r=30, t=60, b=90),
@@ -228,7 +245,7 @@ def _png_bytes(fig):
     )
     export.update_yaxes(automargin=True)
     export.update_xaxes(automargin=True)
-    return export.to_image(format="png", scale=2, width=1100, height=600)
+    return export.to_image(format="pdf", width=1100, height=600)
 
 
 def render(run_dir):
@@ -255,15 +272,15 @@ def render(run_dir):
     tp_dl = _throughput_fig(obs, group_by=gb, direction="dl")
     tp_ul = _throughput_fig(obs, group_by=gb, direction="ul")
     tcol1, tcol2 = st.columns(2)
-    tcol1.plotly_chart(tp_dl, use_container_width=True)
-    tcol2.plotly_chart(tp_ul, use_container_width=True)
+    tcol1.plotly_chart(tp_dl, width="stretch")
+    tcol2.plotly_chart(tp_ul, width="stretch")
 
     st.markdown("#### Delivery quality")
     a, b = st.columns(2)
     with a:
-        st.plotly_chart(_loss_fig(obs), use_container_width=True)
+        st.plotly_chart(_loss_fig(obs), width="stretch")
     with b:
-        st.plotly_chart(_latency_fig(obs), use_container_width=True)
+        st.plotly_chart(_latency_fig(obs), width="stretch")
     tm = timing.load(run_dir)
     if tm:
         st.caption("Latency is converted to UTC with per-node run anchors. Absolute "
@@ -277,7 +294,7 @@ def render(run_dir):
 
     st.markdown("#### Designed vs realized")
     dvr_fig = _designed_vs_realized_fig(obs, designed)
-    st.plotly_chart(dvr_fig, use_container_width=True)
+    st.plotly_chart(dvr_fig, width="stretch")
 
     _render_channel_context(run_dir, profile)
     _render_xapp_health(run_dir, profile)
@@ -312,7 +329,7 @@ def render(run_dir):
                                   default=defaults, key="radio_ues")
         if selected:
             prb_fig = _prb_fig(prb_data, selected)
-            st.plotly_chart(prb_fig, use_container_width=True)
+            st.plotly_chart(prb_fig, width="stretch")
             extra_figs["prb_timeseries"] = prb_fig
 
             efficiency = prb.efficiency(run_dir)
@@ -322,7 +339,7 @@ def render(run_dir):
                 st.warning(f"Efficiency unavailable: {reason}")
             else:
                 eff_fig = _efficiency_fig(efficiency, selected)
-                st.plotly_chart(eff_fig, use_container_width=True)
+                st.plotly_chart(eff_fig, width="stretch")
                 extra_figs["bits_per_prb"] = eff_fig
 
         window = timing.xapp_window(tm) if tm else None
@@ -343,8 +360,9 @@ def render(run_dir):
     cols = st.columns(len(figs))
     for (name, fig), col in zip(figs.items(), cols):
         try:
-            col.download_button(f"⬇ {name}.png", data=_png_bytes(fig),
-                                file_name=f"{run_dir.name}_{name}.png",
-                                mime="image/png")
-        except Exception as e:
-            col.caption(f"{name}: install kaleido to export")
+            col.download_button(f"⬇ {name}.pdf", data=_pdf_bytes(fig),
+                                file_name=f"{run_dir.name}_{name}.pdf",
+                                mime="application/pdf")
+        except Exception as exc:
+            col.caption(
+                f"{name}: PDF export failed ({type(exc).__name__}: {exc})")

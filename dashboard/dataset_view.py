@@ -9,7 +9,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import streamlit as st
 
-from twindash import dataset, schema, settings
+from twindash import dataset, dataset_v2, schema, settings
 
 
 def _capture_signature(run_dir: Path) -> tuple:
@@ -39,7 +39,8 @@ def _load_capture(run_dir_value: str, signature: tuple):
     observed_path = run_dir / schema.OBSERVED_KPIS
     observed = (pd.read_parquet(observed_path) if observed_path.exists()
                 else pd.DataFrame())
-    return features, observed, dataset.quality(run_dir, features)
+    tables = dataset_v2.build_tables(run_dir)
+    return features, observed, dataset.quality(run_dir, features), tables
 
 
 def _coverage_table(features: pd.DataFrame) -> pd.DataFrame:
@@ -80,7 +81,7 @@ def _export_plan(records: list[dataset.Execution]) -> pd.DataFrame:
                               else "missing / failed")
         else:
             channel_labels = "not scheduled"
-        flow_path = record.path / schema.OBSERVED_KPIS
+        table_rows = quality.get("table_rows") or record.metadata.get("table_rows") or {}
         rows.append({
             "execution": record.execution_id,
             "profile": record.profile_id,
@@ -89,8 +90,12 @@ def _export_plan(records: list[dataset.Execution]) -> pd.DataFrame:
                 f"{quality.get('measured_ues', 0)}/"
                 f"{quality.get('expected_ues', 0)}"
             ),
-            "model rows": int(quality.get("feature_rows", 0)),
-            "flow KPI records": _parquet_rows(flow_path),
+            "packet rows": int(table_rows.get(schema.PACKET_OUTCOMES, 0)),
+            "UE-app-second rows": int(
+                table_rows.get(schema.UE_APP_SECOND_OBSERVED, 0)),
+            "channel segments": int(table_rows.get(schema.CHANNEL_SEGMENTS, 0)),
+            "training rows": int(
+                table_rows.get(schema.SEGMENT_TRAINING_TABLE, 0)),
             "radio-labelled rows": int(quality.get("radio_rows", 0)),
             "channel labels": channel_labels,
             "clean xApp shutdown": bool(xapp.get("clean_shutdown", False)),
@@ -103,7 +108,7 @@ def _export_sample_signature(records: list[dataset.Execution]) -> tuple:
     result = []
     for record in records:
         files = []
-        for name in (schema.UE_SECOND_FEATURES, schema.OBSERVED_KPIS):
+        for name in schema.V2_TABLES:
             target = record.path / name
             stat = target.stat()
             files.append((name, stat.st_mtime_ns, stat.st_size))
@@ -115,30 +120,38 @@ def _export_sample_signature(records: list[dataset.Execution]) -> tuple:
 @st.cache_data(show_spinner=False)
 def _load_export_samples(signature: tuple, rows_per_execution: int = 5):
     """Load a small preview transformed exactly like dataset.export()."""
-    feature_frames = []
-    flow_frames = []
+    frames = {name: [] for name in schema.V2_TABLES}
     for execution_id, profile_id, path_value, _ in signature:
         archive = Path(path_value)
         split = dataset._split(execution_id)
 
-        features = _parquet_head(
-            archive / schema.UE_SECOND_FEATURES, rows_per_execution).copy()
-        features["split"] = split
-        feature_frames.append(features)
+        for name in schema.V2_TABLES:
+            frame = _parquet_head(archive / name, rows_per_execution).copy()
+            frame["split"] = split
+            frames[name].append(frame)
 
-        flows = _parquet_head(
-            archive / schema.OBSERVED_KPIS, rows_per_execution).copy()
-        flows["execution_id"] = execution_id
-        flows["profile_id"] = profile_id
-        flows["split"] = split
-        flow_frames.append(flows)
+    return {
+        name: (pd.concat(items, ignore_index=True) if items else pd.DataFrame())
+        for name, items in frames.items()
+    }
 
-    return (
-        pd.concat(feature_frames, ignore_index=True) if feature_frames
-        else pd.DataFrame(),
-        pd.concat(flow_frames, ignore_index=True) if flow_frames
-        else pd.DataFrame(),
-    )
+
+def _contract_roles() -> pd.DataFrame:
+    contract = dataset_v2.model_contract()
+    rows = []
+    for role, fields in contract["roles"].items():
+        if isinstance(fields, dict):
+            for field, note in fields.items():
+                rows.append({"field": field, "modelling role": role, "notes": note})
+        else:
+            for field in fields:
+                rows.append({"field": field, "modelling role": role, "notes": ""})
+    for field, reason in contract["quarantined_fields"].items():
+        rows.append({
+            "field": field, "modelling role": "quarantined",
+            "notes": reason,
+        })
+    return pd.DataFrame(rows)
 
 
 def _capture_inventory(run_dir: Path, features: pd.DataFrame,
@@ -210,18 +223,18 @@ def _render_latest_capture(run_dir: Path):
         "uses the same transformation that will produce the archived training table.")
     try:
         with st.spinner("Inspecting the collected traffic, radio, and channel artifacts…"):
-            features, observed, quality = _load_capture(
+            features, observed, quality, tables = _load_capture(
                 str(run_dir), _capture_signature(run_dir))
     except Exception as exc:
         st.warning(
             "No complete execution can be inspected yet. Run the experiment and "
             f"collect its logs first. Details: {exc}")
-        return None, pd.DataFrame(), pd.DataFrame(), {}
+        return None, pd.DataFrame(), pd.DataFrame(), {}, {}
     if features.empty:
         st.warning(
             "The collected artifacts did not produce any model-ready UE-second "
             "rows. Review the Results page before archiving this execution.")
-        return None, features, observed, quality
+        return None, features, observed, quality, tables
 
     execution = (str(features["execution_id"].iloc[0])
                  if not features.empty and "execution_id" in features else "unknown")
@@ -267,6 +280,29 @@ def _render_latest_capture(run_dir: Path):
         _capture_inventory(run_dir, features, observed, quality),
         hide_index=True, width="stretch")
 
+    st.markdown("#### Dataset Contract V2 tables")
+    table_descriptions = dataset_v2.model_contract()["tables"]
+    table_summary = pd.DataFrame([
+        {
+            "table": name,
+            "grain": table_descriptions[name],
+            "rows": len(tables[name]),
+            "columns": len(tables[name].columns),
+        }
+        for name in schema.V2_TABLES
+    ])
+    st.dataframe(table_summary, hide_index=True, width="stretch")
+    st.caption(
+        "Packet outcomes are the reconstruction base. Exact segment p50/p95 are "
+        "computed from those packet rows; DL and UL remain separate. The training "
+        "table has one row per execution, UE, direction, and half-open channel segment.")
+    with st.expander("Inspect modelling roles, quarantine reasons, and V2 samples"):
+        st.dataframe(_contract_roles(), hide_index=True, width="stretch")
+        for name in schema.V2_TABLES:
+            st.caption(f"{name}: coverage and sample")
+            st.dataframe(_coverage_table(tables[name]), hide_index=True, width="stretch")
+            st.dataframe(tables[name].head(10), hide_index=True, width="stretch")
+
     with st.expander(
             f"Inspect {len(features.columns)} exported columns and sample model rows"):
         st.caption(
@@ -284,7 +320,7 @@ def _render_latest_capture(run_dir: Path):
             })
         st.caption("Sample of the exact UE × second table that will be archived:")
         st.dataframe(features.head(25), hide_index=True, width="stretch")
-    return execution, features, observed, quality
+    return execution, features, observed, quality, tables
 
 
 def render(run_dir: Path, profiles_dir: Path) -> None:
@@ -294,7 +330,7 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
         "as immutable archives, then combine selected executions into model-ready "
         "train/validation/test tables. Splits are assigned by execution, never by row.")
 
-    execution, _, _, _ = _render_latest_capture(run_dir)
+    execution, _, _, _, _ = _render_latest_capture(run_dir)
 
     st.divider()
     st.subheader("2. Archive this capture")
@@ -342,7 +378,8 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
                 f"{quality.get('measured_ues', 0)}/"
                 f"{quality.get('expected_ues', 0)}"
             ),
-            "model rows": quality.get("feature_rows", 0),
+            "training rows": (record.metadata.get("table_rows") or {}).get(
+                schema.SEGMENT_TRAINING_TABLE, 0),
             "radio-labelled rows": quality.get("radio_rows", 0),
             "radio timing": quality.get("radio_clock", "legacy / unknown"),
             "channel-label status": channel_labels,
@@ -353,7 +390,7 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
         })
     catalog = st.data_editor(
         pd.DataFrame(table), hide_index=True, width="stretch",
-        disabled=["execution", "profile", "UEs represented", "model rows",
+        disabled=["execution", "profile", "UEs represented", "training rows",
                   "radio-labelled rows", "radio timing", "channel-label status",
                   "clean xApp shutdown", "archived"],
         column_config={
@@ -380,12 +417,12 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
     st.markdown("#### Export preview")
     if selected:
         plan = _export_plan(selected)
-        selected_rows = int(plan["model rows"].sum())
-        flow_rows = int(plan["flow KPI records"].sum())
+        selected_rows = int(plan["training rows"].sum())
+        packet_rows = int(plan["packet rows"].sum())
         summary = st.columns(4)
         summary[0].metric("Selected executions", f"{len(selected):,}")
-        summary[1].metric("UE × second model rows", f"{selected_rows:,}")
-        summary[2].metric("Per-flow KPI records", f"{flow_rows:,}")
+        summary[1].metric("Segment training rows", f"{selected_rows:,}")
+        summary[2].metric("Packet outcomes", f"{packet_rows:,}")
         split_counts = plan["assigned split"].value_counts()
         split_text = " · ".join(
             f"{name} {int(split_counts.get(name, 0))}"
@@ -400,12 +437,12 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
 
         split_summary = (plan.groupby("assigned split", as_index=False)
                          .agg(executions=("execution", "count"),
-                              model_rows=("model rows", "sum"),
-                              flow_KPI_records=("flow KPI records", "sum"),
+                              training_rows=("training rows", "sum"),
+                              packet_rows=("packet rows", "sum"),
                               radio_labelled_rows=("radio-labelled rows", "sum")))
         split_summary = split_summary.rename(columns={
-            "model_rows": "model rows",
-            "flow_KPI_records": "flow KPI records",
+            "training_rows": "training rows",
+            "packet_rows": "packet rows",
             "radio_labelled_rows": "radio-labelled rows",
         })
         split_summary["assigned split"] = pd.Categorical(
@@ -414,11 +451,13 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
         split_summary = split_summary.sort_values("assigned split")
         with st.expander("Inspect output tables and sample exported rows"):
             st.markdown(
-                "- **`ue_second_features.parquet`** — one model row for each "
-                "observed UE and second, with traffic, radio, channel, provenance, "
-                "and `split` columns.\n"
-                "- **`observed_kpis.parquet`** — one record for each observed MGEN "
-                "flow KPI, with execution, profile, and `split` columns.\n"
+                "- **`packet_outcomes.parquet`** — one row per transmitted packet.\n"
+                "- **`ue_app_second_observed.parquet`** — exact additive "
+                "UE/application/direction/UTC-second observations.\n"
+                "- **`channel_segments.parquet`** — verified half-open channel intervals.\n"
+                "- **`segment_training_table.parquet`** — one DL or UL segment row; "
+                "p95 is recomputed from packet rows.\n"
+                "- **`model_contract.json`** — field roles and quarantine reasons.\n"
                 "- **`dataset_manifest.json`** — selected executions, quality "
                 "metadata, annotations, split assignments, and checksum results.\n"
                 "- Optional CSV copies contain the same two tables.")
@@ -426,12 +465,11 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
             st.dataframe(split_summary, hide_index=True, width="stretch")
             if st.checkbox("Load sample rows from the selected archives"):
                 with st.spinner("Reading small samples from the immutable archives…"):
-                    feature_sample, flow_sample = _load_export_samples(
+                    samples = _load_export_samples(
                         _export_sample_signature(selected))
-                st.caption("Sample from `ue_second_features.parquet`:")
-                st.dataframe(feature_sample, hide_index=True, width="stretch")
-                st.caption("Sample from `observed_kpis.parquet`:")
-                st.dataframe(flow_sample, hide_index=True, width="stretch")
+                for table_name, sample in samples.items():
+                    st.caption(f"Sample from `{table_name}`:")
+                    st.dataframe(sample, hide_index=True, width="stretch")
     else:
         st.info(
             "No archived executions are selected. Mark Include in the curation "
@@ -447,7 +485,7 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
             target = dataset.export(
                 selected, settings.datasets_dir() / name, include_csv=include_csv)
             st.success(
-                f"Exported {target}. It contains ue_second_features.parquet, "
-                "observed_kpis.parquet, and dataset_manifest.json.")
+                f"Exported {target}. It contains all four schema-V2 tables, "
+                "model_contract.json, checksums, and dataset_manifest.json.")
         except Exception as exc:
             st.error(f"Dataset export failed: {exc}")

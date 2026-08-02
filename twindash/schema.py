@@ -20,6 +20,19 @@ CHANNEL_SCHEDULE = "channel_schedule.json"
 EXECUTIONS_DIR = "executions"
 EXECUTION_METADATA = "metadata.json"
 UE_SECOND_FEATURES = "ue_second_features.parquet"
+SCHEMA_VERSION = 2
+PACKET_OUTCOMES = "packet_outcomes.parquet"
+UE_APP_SECOND_OBSERVED = "ue_app_second_observed.parquet"
+CHANNEL_SEGMENTS = "channel_segments.parquet"
+SEGMENT_TRAINING_TABLE = "segment_training_table.parquet"
+MODEL_CONTRACT = "model_contract.json"
+DATASET_MANIFEST = "dataset_manifest.json"
+V2_TABLES = (
+    PACKET_OUTCOMES,
+    UE_APP_SECOND_OBSERVED,
+    CHANNEL_SEGMENTS,
+    SEGMENT_TRAINING_TABLE,
+)
 LOGS_DIR = "logs"
 SCRIPTS_DIR = "mgen_scripts"
 

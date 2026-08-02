@@ -10,21 +10,26 @@ def _execution(tmp_path: Path, execution_id: str, profile_id: str,
                feature_rows: int, flow_rows: int) -> dataset.Execution:
     archive = tmp_path / execution_id
     archive.mkdir()
-    pd.DataFrame({
-        "execution_id": [execution_id] * feature_rows,
-        "profile_id": [profile_id] * feature_rows,
-        "utc_second": range(feature_rows),
-        "ue": ["ue1"] * feature_rows,
-    }).to_parquet(archive / schema.UE_SECOND_FEATURES, index=False)
-    pd.DataFrame({
-        "utc_second": range(flow_rows),
-        "flow": range(flow_rows),
-    }).to_parquet(archive / schema.OBSERVED_KPIS, index=False)
+    row_counts = {
+        schema.PACKET_OUTCOMES: flow_rows,
+        schema.UE_APP_SECOND_OBSERVED: feature_rows,
+        schema.CHANNEL_SEGMENTS: 1,
+        schema.SEGMENT_TRAINING_TABLE: 1,
+    }
+    for name, rows in row_counts.items():
+        pd.DataFrame({
+            "execution_id": [execution_id] * rows,
+            "profile_id": [profile_id] * rows,
+            "ue": ["ue1"] * rows,
+            "value": range(rows),
+        }).to_parquet(archive / name, index=False)
     return dataset.Execution(
         execution_id=execution_id,
         profile_id=profile_id,
         path=archive,
         metadata={
+            "schema_version": 2,
+            "table_rows": row_counts,
             "quality": {
                 "expected_ues": 2,
                 "measured_ues": 1,
@@ -64,22 +69,20 @@ def test_export_preview_matches_export_split_and_row_counts(tmp_path):
         first.execution_id)
     assert plan.loc[second.execution_id, "assigned split"] == dataset._split(
         second.execution_id)
-    assert plan["model rows"].sum() == 5
-    assert plan["flow KPI records"].sum() == 9
+    assert plan["UE-app-second rows"].sum() == 5
+    assert plan["packet rows"].sum() == 9
+    assert plan["training rows"].sum() == 2
     assert plan.loc[first.execution_id, "UEs represented"] == "1/2"
 
-    features, flows = dataset_view._load_export_samples(
+    samples = dataset_view._load_export_samples(
         dataset_view._export_sample_signature([first, second]),
         rows_per_execution=1,
     )
 
-    assert len(features) == 2
-    assert len(flows) == 2
+    assert all(len(frame) == 2 for frame in samples.values())
     for record in (first, second):
         expected_split = dataset._split(record.execution_id)
-        assert features.loc[
-            features["execution_id"] == record.execution_id, "split"
-        ].tolist() == [expected_split]
-        flow = flows.loc[flows["execution_id"] == record.execution_id].iloc[0]
-        assert flow["profile_id"] == record.profile_id
-        assert flow["split"] == expected_split
+        for frame in samples.values():
+            row = frame.loc[frame["execution_id"] == record.execution_id].iloc[0]
+            assert row["profile_id"] == record.profile_id
+            assert row["split"] == expected_split
