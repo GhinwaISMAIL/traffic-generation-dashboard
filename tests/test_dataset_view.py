@@ -86,3 +86,18 @@ def test_export_preview_matches_export_split_and_row_counts(tmp_path):
             row = frame.loc[frame["execution_id"] == record.execution_id].iloc[0]
             assert row["profile_id"] == record.profile_id
             assert row["split"] == expected_split
+
+
+def test_radio_lag_note_explains_old_archive_ratio_without_calling_it_network_delay():
+    quality = {
+        "radio_rows": 100,
+        "radio_clock": "dual",
+        "source_wall_ratio": 0.64,
+    }
+
+    note = dataset_view._radio_lag_note(quality)
+
+    assert "source/wall ratio 0.640" in note
+    assert "not an E2 network-delay estimate" in note
+    assert "pre-run X" in note
+    assert dataset_view._radio_timing_label(quality) == "lag warning"

@@ -68,8 +68,24 @@ def model_contract() -> dict:
             "quality_only": [
                 "verified", "channel_agreement", "packet_evidence",
                 "model_mapping_valid", "valid_clock_fraction", "radio_samples",
-                "source_wall_ratio", "training_eligible",
+                "source_wall_ratio", "radio_join_clock",
+                "radio_clock_lag_samples", "radio_clock_lag_s_segment_mean",
+                "radio_clock_lag_s_segment_p95", "radio_clock_lag_s_segment_max",
+                "radio_clock_lag_warning", "training_eligible",
             ],
+        },
+        "radio_clock_policy": {
+            "cross_system_join_clock": "core receipt UTC",
+            "source_clock_role": "radio ordering and provenance only",
+            "segment_radio_aggregates": "receipt-clock aligned post-run diagnostics",
+            "lag_warning_threshold_s": prb.RADIO_LAG_WARNING_S,
+            "near_realtime_source_wall_ratio": list(
+                prb.REALTIME_SOURCE_WALL_RATIO),
+            "interpretation": (
+                "when radio_clock_lag_warning=true, do not interpret segment radio "
+                "means as instantaneous causal responses to the current channel "
+                "value or use them as pre-run model inputs"
+            ),
         },
         "quarantined_fields": {
             name: "observed values were dead, broken, or scientifically suspect"
@@ -80,6 +96,7 @@ def model_contract() -> dict:
             "DL and UL are never combined",
             "UL is uncontrolled unless a verified stable UL mapping exists",
             "post-run radio outcomes are excluded from pre-run X",
+            "radio segment means use core receipt time and carry explicit lag provenance",
             "train/validation/test splits are assigned by execution_id",
         ],
     }
@@ -446,6 +463,69 @@ def channel_segments(run_dir) -> pd.DataFrame:
     return result
 
 
+def enrich_radio_clock_provenance(training: pd.DataFrame,
+                                  radio: pd.DataFrame) -> pd.DataFrame:
+    """Add explicit dual-clock provenance to segment-level radio diagnostics.
+
+    This helper is also used during export so older immutable V2 archives gain
+    the additive fields without modifying their checksummed source files.
+    """
+    result = training.copy()
+    fields = (
+        "radio_join_clock", "radio_clock_lag_samples",
+        "radio_clock_lag_s_segment_mean", "radio_clock_lag_s_segment_p95",
+        "radio_clock_lag_s_segment_max", "radio_clock_lag_warning",
+    )
+    if result.empty:
+        for field in fields:
+            if field not in result:
+                result[field] = pd.Series(dtype="object")
+        return result
+
+    for field in fields:
+        if field not in result:
+            result[field] = pd.NA
+    radio = radio if radio is not None else pd.DataFrame()
+    if radio.empty or "ue" not in radio:
+        return result
+
+    time_column = (
+        "receipt_utc_second" if "receipt_utc_second" in radio else "utc_second")
+    if time_column not in radio:
+        return result
+    for index, segment in result.iterrows():
+        mask = (
+            radio["ue"].astype(str).eq(str(segment["ue"])) &
+            radio[time_column].ge(segment["segment_start_utc"]) &
+            radio[time_column].lt(segment["segment_end_utc"])
+        )
+        part = radio.loc[mask]
+        ratio = segment.get("source_wall_ratio")
+        ratio = None if pd.isna(ratio) else float(ratio)
+        summary = prb.clock_lag_summary(part, source_wall_ratio=ratio)
+        if not summary["radio_clock_lag_samples"]:
+            continue
+        result.at[index, "radio_join_clock"] = summary["radio_join_clock"]
+        result.at[index, "radio_clock_lag_samples"] = summary[
+            "radio_clock_lag_samples"]
+        result.at[index, "radio_clock_lag_s_segment_mean"] = summary[
+            "radio_clock_lag_s_mean"]
+        result.at[index, "radio_clock_lag_s_segment_p95"] = summary[
+            "radio_clock_lag_s_p95"]
+        result.at[index, "radio_clock_lag_s_segment_max"] = summary[
+            "radio_clock_lag_s_max"]
+        result.at[index, "radio_clock_lag_warning"] = summary[
+            "radio_clock_lag_warning"]
+    result["radio_join_clock"] = result["radio_join_clock"].astype("str")
+    for field in (
+            "radio_clock_lag_samples", "radio_clock_lag_s_segment_mean",
+            "radio_clock_lag_s_segment_p95", "radio_clock_lag_s_segment_max"):
+        result[field] = pd.to_numeric(result[field], errors="coerce")
+    result["radio_clock_lag_warning"] = result[
+        "radio_clock_lag_warning"].astype("boolean")
+    return result
+
+
 def segment_training_table(run_dir, packets: pd.DataFrame,
                            segments: pd.DataFrame, radio: pd.DataFrame) -> pd.DataFrame:
     """Aggregate packets and radio measurements at channel-segment grain."""
@@ -518,6 +598,7 @@ def segment_training_table(run_dir, packets: pd.DataFrame,
             row["valid_clock_fraction"] >= .95 and len(valid))
         rows.append(row)
     result = pd.DataFrame(rows)
+    result = enrich_radio_clock_provenance(result, radio)
     if not result.empty and result["segment_id"].duplicated().any():
         raise ValueError("segment training table key is not unique")
     return result

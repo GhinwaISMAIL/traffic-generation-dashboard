@@ -9,7 +9,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import streamlit as st
 
-from twindash import dataset, dataset_v2, schema, settings
+from twindash import dataset, dataset_v2, prb, schema, settings
 
 
 def _capture_signature(run_dir: Path) -> tuple:
@@ -126,7 +126,14 @@ def _load_export_samples(signature: tuple, rows_per_execution: int = 5):
         split = dataset._split(execution_id)
 
         for name in schema.V2_TABLES:
-            frame = _parquet_head(archive / name, rows_per_execution).copy()
+            if (name == schema.SEGMENT_TRAINING_TABLE and
+                    (archive / schema.UE_SECOND_FEATURES).is_file()):
+                frame = dataset_v2.enrich_radio_clock_provenance(
+                    pd.read_parquet(archive / name),
+                    pd.read_parquet(archive / schema.UE_SECOND_FEATURES),
+                ).head(rows_per_execution).copy()
+            else:
+                frame = _parquet_head(archive / name, rows_per_execution).copy()
             frame["split"] = split
             frames[name].append(frame)
 
@@ -152,6 +159,45 @@ def _contract_roles() -> pd.DataFrame:
             "notes": reason,
         })
     return pd.DataFrame(rows)
+
+
+def _radio_lag_note(quality: dict) -> str | None:
+    """Explain receipt/source divergence without calling it network latency."""
+    if not quality.get("radio_rows", 0):
+        return None
+    ratio = quality.get("source_wall_ratio")
+    warning = quality.get("radio_clock_lag_warning")
+    if warning is None and ratio is not None:
+        low, high = prb.REALTIME_SOURCE_WALL_RATIO
+        warning = not (low <= float(ratio) <= high)
+    if not warning:
+        return None
+    mean = quality.get("radio_clock_lag_s_mean")
+    p95 = quality.get("radio_clock_lag_s_p95")
+    measurements = []
+    if mean is not None:
+        measurements.append(f"mean receipt-minus-source divergence {float(mean):.1f} s")
+    if p95 is not None:
+        measurements.append(f"p95 {float(p95):.1f} s")
+    if ratio is not None:
+        measurements.append(f"source/wall ratio {float(ratio):.3f}")
+    detail = "; ".join(measurements) or "source time is not near real time"
+    return (
+        f"Radio clock warning: {detail}. This is RFsim source-clock dilation, "
+        "not an E2 network-delay estimate. Segment radio means use core receipt "
+        "UTC and are post-run diagnostics; do not interpret them as instantaneous "
+        "responses or use them in pre-run X."
+    )
+
+
+def _radio_timing_label(quality: dict) -> str:
+    if not quality.get("radio_rows", 0):
+        return "not captured"
+    note = _radio_lag_note(quality)
+    p95 = quality.get("radio_clock_lag_s_p95")
+    if note:
+        return f"lag warning (p95 {float(p95):.1f} s)" if p95 is not None else "lag warning"
+    return "dual clock / near real time"
 
 
 def _capture_inventory(run_dir: Path, features: pd.DataFrame,
@@ -192,7 +238,8 @@ def _capture_inventory(run_dir: Path, features: pd.DataFrame,
                 f"errors: {int(xapp.get('errors', 0))}; "
                 f"clock: {quality.get('radio_clock', 'unknown')}; "
                 f"source/wall ratio: "
-                f"{quality.get('source_wall_ratio') if quality.get('source_wall_ratio') is not None else 'n/a'}"
+                f"{quality.get('source_wall_ratio') if quality.get('source_wall_ratio') is not None else 'n/a'}; "
+                f"alignment: {_radio_timing_label(quality)}"
             ),
         },
         {
@@ -274,6 +321,9 @@ def _render_latest_capture(run_dir: Path):
                         quality.get("channel_state_verified") else
                         "no channel schedule was requested")
         st.success(f"Capture is internally consistent; {channel_note}.")
+    radio_lag_note = _radio_lag_note(quality)
+    if radio_lag_note:
+        st.warning(radio_lag_note)
 
     st.markdown("#### What was captured")
     st.dataframe(
@@ -298,6 +348,8 @@ def _render_latest_capture(run_dir: Path):
         "table has one row per execution, UE, direction, and half-open channel segment.")
     with st.expander("Inspect modelling roles, quarantine reasons, and V2 samples"):
         st.dataframe(_contract_roles(), hide_index=True, width="stretch")
+        st.caption("Radio clock policy")
+        st.json(dataset_v2.model_contract()["radio_clock_policy"])
         for name in schema.V2_TABLES:
             st.caption(f"{name}: coverage and sample")
             st.dataframe(_coverage_table(tables[name]), hide_index=True, width="stretch")
@@ -381,7 +433,7 @@ def render(run_dir: Path, profiles_dir: Path) -> None:
             "training rows": (record.metadata.get("table_rows") or {}).get(
                 schema.SEGMENT_TRAINING_TABLE, 0),
             "radio-labelled rows": quality.get("radio_rows", 0),
-            "radio timing": quality.get("radio_clock", "legacy / unknown"),
+            "radio timing": _radio_timing_label(quality),
             "channel-label status": channel_labels,
             "clean xApp shutdown": xapp.get("clean_shutdown", False),
             "tags": ", ".join(annotations.get("tags") or []),

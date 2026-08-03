@@ -114,6 +114,9 @@ def test_archive_is_immutable_and_export_splits_by_execution(tmp_path):
     assert metadata["quality"]["channel_state_verified"] is True
     assert metadata["quality"]["radio_clock_valid"] is True
     assert metadata["quality"]["radio_clock"] == "dual"
+    assert metadata["quality"]["radio_join_clock"] == "core_receipt_utc"
+    assert metadata["quality"]["radio_clock_lag_warning"] is True
+    assert metadata["quality"]["radio_clock_lag_s_p95"] > 0
     records = dataset.list_executions(tmp_path)
     dataset.update_annotations(
         records[0], include=True, tags="calibration, awgn", notes="clean run")
@@ -166,6 +169,17 @@ def test_v2_packet_accounting_keys_segments_and_exact_percentile(tmp_path):
         (packets["sent_time_utc"] < treated["segment_end_utc"]) &
         packets["received"], "latency_ms"].quantile(.95)
     assert treated["latency_ms_p95"] == pytest.approx(expected)
+    radio_row = training[training["radio_join_clock"].notna()].iloc[0]
+    assert radio_row["radio_join_clock"] == "core_receipt_utc"
+    assert bool(radio_row["radio_clock_lag_warning"])
+    assert radio_row["radio_clock_lag_s_segment_p95"] > 0
+
+    contract = dataset_v2.model_contract()
+    assert contract["radio_clock_policy"]["cross_system_join_clock"] == (
+        "core receipt UTC")
+    assert "radio_clock_lag_warning" in contract["roles"]["quality_only"]
+    assert "radio segment means use core receipt time" in " ".join(
+        contract["rules"])
 
 
 def test_v2_archive_reconstructs_all_tables_from_frozen_inputs(tmp_path):
@@ -192,6 +206,26 @@ def test_v2_export_rejects_schema_v1_archive(tmp_path):
 
     with pytest.raises(ValueError, match="V2 export accepts only"):
         dataset.export(dataset.list_executions(tmp_path), tmp_path / "v1-export")
+
+
+def test_v2_export_adds_radio_lag_fields_to_older_immutable_archive(tmp_path):
+    archive = dataset.archive_execution(sample_run(tmp_path))
+    target = archive / schema.SEGMENT_TRAINING_TABLE
+    old = pd.read_parquet(target).drop(columns=[
+        "radio_join_clock", "radio_clock_lag_samples",
+        "radio_clock_lag_s_segment_mean", "radio_clock_lag_s_segment_p95",
+        "radio_clock_lag_s_segment_max", "radio_clock_lag_warning",
+    ])
+    old.to_parquet(target, index=False)
+    dataset._write_checksums(archive)
+
+    exported = dataset.export(
+        dataset.list_executions(tmp_path), tmp_path / "lag-enriched")
+    training = pd.read_parquet(exported / schema.SEGMENT_TRAINING_TABLE)
+
+    assert "radio_clock_lag_s_segment_p95" in training
+    assert training["radio_join_clock"].eq("core_receipt_utc").any()
+    assert training["radio_clock_lag_warning"].fillna(False).any()
 
 
 def test_export_rejects_tampered_archive_without_partial_output(tmp_path):

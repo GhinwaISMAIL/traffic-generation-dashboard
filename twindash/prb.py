@@ -17,10 +17,64 @@ from . import kpis, timing
 PRB_CSV = "prb_by_second.csv"
 RNTI_MAP = "rnti_map.csv"
 DUAL_CLOCK_COLUMNS = ("recv_tstamp_us", "source_tstamp_us")
+RADIO_LAG_WARNING_S = 5.0
+REALTIME_SOURCE_WALL_RATIO = (0.9, 1.1)
 REQUIRED_PRB_COLUMNS = (
     "utc_second", *DUAL_CLOCK_COLUMNS, "nb_id", "rnti",
     "dl_aggr_prb", "ul_aggr_prb", "samples",
 )
+
+
+def clock_lag_summary(frame: pd.DataFrame, *, source_wall_ratio=None) -> dict:
+    """Describe RFsim source-clock divergence from the core receipt clock.
+
+    This is not an E2 transport-latency estimate.  RFsim source time may advance
+    more slowly than host UTC, so the signed receipt-minus-source difference can
+    grow throughout a run even while indications continue arriving regularly.
+    """
+    result = {
+        "radio_join_clock": None,
+        "radio_clock_lag_samples": 0,
+        "radio_clock_lag_s_mean": None,
+        "radio_clock_lag_s_p95": None,
+        "radio_clock_lag_s_max": None,
+        "radio_clock_lag_warning": False,
+    }
+    if frame is None or frame.empty or not all(
+            column in frame for column in DUAL_CLOCK_COLUMNS):
+        return result
+
+    pairs = frame[list(DUAL_CLOCK_COLUMNS)].apply(
+        pd.to_numeric, errors="coerce").dropna()
+    if pairs.empty:
+        return result
+    lag = (pairs["recv_tstamp_us"] - pairs["source_tstamp_us"]) / 1e6
+    absolute = lag.abs()
+    ratio = source_wall_ratio
+    if ratio is None:
+        receipt_span = (
+            pairs["recv_tstamp_us"].max() - pairs["recv_tstamp_us"].min()
+        ) / 1e6
+        source_span = (
+            pairs["source_tstamp_us"].max() - pairs["source_tstamp_us"].min()
+        ) / 1e6
+        ratio = float(source_span / receipt_span) if receipt_span > 0 else None
+    ratio_warning = bool(
+        ratio is not None and not (
+            REALTIME_SOURCE_WALL_RATIO[0] <= float(ratio) <=
+            REALTIME_SOURCE_WALL_RATIO[1]
+        )
+    )
+    result.update({
+        "radio_join_clock": "core_receipt_utc",
+        "radio_clock_lag_samples": int(len(lag)),
+        "radio_clock_lag_s_mean": float(lag.mean()),
+        "radio_clock_lag_s_p95": float(lag.quantile(.95)),
+        "radio_clock_lag_s_max": float(lag.max()),
+        "radio_clock_lag_warning": bool(
+            absolute.quantile(.95) > RADIO_LAG_WARNING_S or ratio_warning),
+    })
+    return result
 
 
 def _empty(error: str | None = None) -> pd.DataFrame:

@@ -248,6 +248,8 @@ def quality(run_dir: Path, features: pd.DataFrame) -> dict:
             float(source_span / receipt_span) if receipt_span > 0 else None)
     else:
         source_wall_ratio = None
+    lag = prb.clock_lag_summary(
+        features, source_wall_ratio=source_wall_ratio)
     return {
         "expected_ues": expected_ues,
         "measured_ues": measured_ues,
@@ -258,6 +260,7 @@ def quality(run_dir: Path, features: pd.DataFrame) -> dict:
             "not captured" if not radio_rows else "legacy"),
         "radio_clock_valid": bool(dual_clock or not radio_rows),
         "source_wall_ratio": source_wall_ratio,
+        **lag,
         "channel_labeled_rows": channel_rows,
         "channel_schedule_enabled": bool(schedule.get("enabled", False)),
         "channel_state_verified": bool(state and state.get("success")),
@@ -501,16 +504,25 @@ def export(records: list[Execution], destination: Path, *, include_csv: bool = F
         manifest = []
         for record in records:
             split = _split(record.execution_id)
+            radio_path = record.path / schema.UE_SECOND_FEATURES
+            radio = (pd.read_parquet(radio_path) if radio_path.is_file()
+                     else pd.DataFrame())
             for name in schema.V2_TABLES:
                 frame = pd.read_parquet(record.path / name)
+                if name == schema.SEGMENT_TRAINING_TABLE:
+                    frame = dataset_v2.enrich_radio_clock_provenance(
+                        frame, radio)
                 frame["split"] = split
                 table_frames[name].append(frame)
+            quality_doc = dict(record.metadata.get("quality", {}) or {})
+            quality_doc.update(prb.clock_lag_summary(
+                radio, source_wall_ratio=quality_doc.get("source_wall_ratio")))
             manifest.append({
                 "execution_id": record.execution_id,
                 "profile_id": record.profile_id,
                 "split": split,
                 "archive_files_verified": verified[record.execution_id],
-                "quality": record.metadata.get("quality", {}),
+                "quality": quality_doc,
                 "annotations": annotations(record),
             })
         table_rows = {}

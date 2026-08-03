@@ -61,6 +61,15 @@ throughput and PRB are joined on `(utc_second, ue)` without treating simulated
 radio time as UTC. Legacy single-clock PRB captures are visible as invalid but
 cannot be archived or exported into a training dataset.
 
+RFsim source time can advance more slowly than host UTC. Dataset Contract V2
+therefore records receipt-minus-source lag mean/p95/max, the source/wall ratio,
+the explicit `core_receipt_utc` join clock, and a lag warning on segment rows.
+This divergence is not an E2 transport-delay estimate. Receipt-aligned MCS,
+PRB, BLER, and SNR means remain post-run diagnostics and must not be interpreted
+as instantaneous channel responses or included in pre-run model inputs when
+the warning is set. Exports derive these additive fields for older immutable V2
+archives from their frozen dual-clock feature table without changing checksums.
+
 `run_profile.json` is written when the experiment is launched. It snapshots the
 deployment type and measurement capabilities used for that run, so changing
 `testbed_config.yaml` later cannot reinterpret historical results. RFsim and
