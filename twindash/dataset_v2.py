@@ -520,7 +520,7 @@ def enrich_radio_clock_provenance(training: pd.DataFrame,
             "radio_clock_lag_s_max"]
         result.at[index, "radio_clock_lag_warning"] = summary[
             "radio_clock_lag_warning"]
-    result["radio_join_clock"] = result["radio_join_clock"].astype("str")
+    result["radio_join_clock"] = result["radio_join_clock"].astype("string")
     for field in (
             "radio_clock_lag_samples", "radio_clock_lag_s_segment_mean",
             "radio_clock_lag_s_segment_p95", "radio_clock_lag_s_segment_max"):

@@ -171,6 +171,10 @@ def test_v2_packet_accounting_keys_segments_and_exact_percentile(tmp_path):
     assert treated["latency_ms_p95"] == pytest.approx(expected)
     radio_row = training[training["radio_join_clock"].notna()].iloc[0]
     assert radio_row["radio_join_clock"] == "core_receipt_utc"
+    unmatched = dataset_v2.enrich_radio_clock_provenance(
+        training.iloc[[0]],
+        pd.DataFrame({"ue": ["other"], "receipt_utc_second": [0]}))
+    assert unmatched["radio_join_clock"].isna().all()
     assert bool(radio_row["radio_clock_lag_warning"])
     assert radio_row["radio_clock_lag_s_segment_p95"] > 0
 
