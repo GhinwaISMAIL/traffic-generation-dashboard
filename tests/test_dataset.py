@@ -182,6 +182,31 @@ def test_v2_packet_accounting_keys_segments_and_exact_percentile(tmp_path):
         contract["rules"])
 
 
+def test_uncontrolled_run_uses_sender_start_for_channel_segments(tmp_path):
+    run = sample_run(tmp_path)
+    (run / schema.LOGS_DIR / "channel_state.json").unlink()
+    (run / schema.CHANNEL_SCHEDULE).write_text(json.dumps({
+        "schema_version": 1,
+        "enabled": False,
+        "expected_model_type": "AWGN",
+        "events": [],
+    }))
+
+    segments = dataset_v2.channel_segments(run)
+
+    assert len(segments) == 2
+    assert set(segments["segment_start_utc"]) == {1_000_009.0}
+    assert not segments["controlled"].any()
+    assert not segments["training_eligible"].any()
+
+    archive = dataset.archive_execution(run)
+    frozen = pd.read_parquet(archive / schema.CHANNEL_SEGMENTS)
+    rebuilt = dataset_v2.channel_segments(archive)
+    pd.testing.assert_frame_equal(
+        frozen.reset_index(drop=True), rebuilt.reset_index(drop=True),
+        check_dtype=False)
+
+
 def test_v2_archive_reconstructs_all_tables_from_frozen_inputs(tmp_path):
     run = sample_run(tmp_path)
     archive = dataset.archive_execution(run)

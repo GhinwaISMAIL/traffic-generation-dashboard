@@ -309,7 +309,9 @@ def _state_start(run_dir: Path, state: dict) -> float:
     if value is not None:
         return float(value)
     timing = _json(run_dir / schema.LOGS_DIR / "run_timing.json", {}) or {}
-    for key in ("traffic_start_epoch", "started_epoch", "wall_start"):
+    for key in (
+            "senders_start_epoch", "traffic_start_epoch", "started_epoch",
+            "wall_start"):
         if timing.get(key) is not None:
             return float(timing[key])
     raise ValueError("cannot determine traffic start for channel segmentation")
@@ -458,6 +460,8 @@ def channel_segments(run_dir) -> pd.DataFrame:
     ).reset_index(drop=True)
     for column in ("requested_value", "applied_value", "model_index"):
         result[column] = pd.to_numeric(result[column], errors="coerce").astype(float)
+    for column in ("parameter", "model_name", "model_type"):
+        result[column] = result[column].astype("string")
     if result["segment_id"].duplicated().any():
         raise ValueError("channel segment identifier is not unique")
     return result
