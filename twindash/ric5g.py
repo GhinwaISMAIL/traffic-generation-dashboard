@@ -171,10 +171,11 @@ def run(run_dir, cfg: dict, *, on_success=None):
 def expected_logs(run_dir, cfg: dict) -> set[str]:
     scripts = Path(run_dir) / schema.SCRIPTS_DIR
     expected = {"dn_dl_tx.log", "dn_ul_rx.log", "rnti_map.csv",
-                "run_timing.json"}
+                "run_timing.json", schema.UE_RADIO_BY_SECOND}
     for path in scripts.glob("ue*_ul_tx.mgn"):
         ue = path.name.removesuffix("_ul_tx.mgn")
-        expected.update({f"{ue}_ul_tx.log", f"{ue}_dl_rx.log"})
+        expected.update({f"{ue}_ul_tx.log", f"{ue}_dl_rx.log",
+                         f"{ue}_radio.log"})
     if (cfg.get("xapp") or {}).get("enabled", True):
         expected.update({"prb_by_second.csv", "xapp.log"})
     schedule = Path(run_dir) / schema.CHANNEL_SCHEDULE

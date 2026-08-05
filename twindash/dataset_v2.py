@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import kpis, prb, run_profile, schema
+from . import kpis, prb, run_profile, schema, ue_radio
 
 
 QUARANTINED_RADIO_COLUMNS = (
@@ -59,7 +59,8 @@ def model_contract() -> dict:
                 "dl_mcs1_avg_segment_mean", "ul_mcs1_avg_segment_mean",
                 "dl_prb_segment_mean", "ul_prb_segment_mean",
                 "dl_bler_avg_segment_mean", "pusch_snr_avg_segment_mean",
-                "pucch_snr_avg_segment_mean",
+                "pucch_snr_avg_segment_mean", "ss_rsrp_dbm_segment_mean",
+                "ss_rsrq_db_segment_mean", "ss_sinr_db_segment_mean",
             ],
             "identity_only": [
                 "execution_id", "profile_id", "segment_id", "cell", "ue",
@@ -68,14 +69,17 @@ def model_contract() -> dict:
             "quality_only": [
                 "verified", "channel_agreement", "packet_evidence",
                 "model_mapping_valid", "valid_clock_fraction", "radio_samples",
+                "ue_radio_samples",
                 "source_wall_ratio", "radio_join_clock",
                 "radio_clock_lag_samples", "radio_clock_lag_s_segment_mean",
                 "radio_clock_lag_s_segment_p95", "radio_clock_lag_s_segment_max",
-                "radio_clock_lag_warning", "training_eligible",
+                "radio_clock_lag_warning", "ue_radio_clock_valid",
+                "ue_radio_emit_lag_s_p95", "training_eligible",
             ],
         },
         "radio_clock_policy": {
             "cross_system_join_clock": "core receipt UTC",
+            "ue_measurement_join_clock": "UE CLOCK_REALTIME UTC second",
             "source_clock_role": "radio ordering and provenance only",
             "segment_radio_aggregates": "receipt-clock aligned post-run diagnostics",
             "lag_warning_threshold_s": prb.RADIO_LAG_WARNING_S,
@@ -97,6 +101,7 @@ def model_contract() -> dict:
             "UL is uncontrolled unless a verified stable UL mapping exists",
             "post-run radio outcomes are excluded from pre-run X",
             "radio segment means use core receipt time and carry explicit lag provenance",
+            "UE serving-cell measurements use their embedded UTC sample second",
             "train/validation/test splits are assigned by execution_id",
         ],
     }
@@ -545,6 +550,8 @@ def segment_training_table(run_dir, packets: pd.DataFrame,
                              "utc_second", "t_s", "cell", "nb_id", "rnti",
                              "recv_tstamp_us", "source_tstamp_us",
                              "receipt_utc_second", "source_utc_second",
+                             "emitted_epoch_us", "ue_index", "ssb",
+                             "ue_radio_sample_count", "ue_radio_emit_lag_s",
                          }]
 
     for segment in segments.to_dict("records"):
@@ -592,11 +599,30 @@ def segment_training_table(run_dir, packets: pd.DataFrame,
                      radio[time_column].ge(segment["segment_start_utc"]) &
                      radio[time_column].lt(segment["segment_end_utc"]))
             rpart = radio.loc[rmask]
-            row["radio_samples"] = int(len(rpart))
+            ue_count = int(rpart.get(
+                "ss_rsrp_dbm", pd.Series(dtype=float)).notna().sum())
+            row["ue_radio_samples"] = ue_count if segment["direction"] == "dl" else 0
+            row["radio_samples"] = int(ue_count or len(rpart))
+            ue_lag = pd.to_numeric(
+                rpart.get("ue_radio_emit_lag_s", pd.Series(dtype=float)),
+                errors="coerce").dropna().abs()
+            row["ue_radio_emit_lag_s_p95"] = (
+                float(ue_lag.quantile(.95)) if segment["direction"] == "dl" and
+                len(ue_lag) else float("nan")
+            )
+            row["ue_radio_clock_valid"] = bool(
+                segment["direction"] != "dl" or
+                (len(ue_lag) and ue_lag.quantile(.95) <= .5)
+            )
             for column in numeric_radio:
+                if column.startswith("ss_") and segment["direction"] != "dl":
+                    continue
                 row[f"{column}_segment_mean"] = rpart[column].mean()
         else:
             row["radio_samples"] = 0
+            row["ue_radio_samples"] = 0
+            row["ue_radio_emit_lag_s_p95"] = float("nan")
+            row["ue_radio_clock_valid"] = False
         row["training_eligible"] = bool(
             row.get("training_eligible") and row["packet_evidence"] and
             row["valid_clock_fraction"] >= .95 and len(valid))
@@ -614,9 +640,13 @@ def build_tables(run_dir) -> dict[str, pd.DataFrame]:
     packets = packet_outcomes(run_dir)
     seconds = ue_app_second_observed(packets)
     segments = channel_segments(run_dir)
-    radio = prb.prb_timeseries(run_dir)
-    if radio.empty and radio.attrs.get("error"):
-        raise ValueError(radio.attrs["error"])
+    mac_radio = prb.prb_timeseries(run_dir)
+    if mac_radio.empty and mac_radio.attrs.get("error"):
+        raise ValueError(mac_radio.attrs["error"])
+    serving_radio = ue_radio.timeseries(run_dir)
+    if serving_radio.empty and serving_radio.attrs.get("error"):
+        raise ValueError(serving_radio.attrs["error"])
+    radio = ue_radio.merge_with_mac(mac_radio, serving_radio)
     training = segment_training_table(run_dir, packets, segments, radio)
     return {
         schema.PACKET_OUTCOMES: packets,

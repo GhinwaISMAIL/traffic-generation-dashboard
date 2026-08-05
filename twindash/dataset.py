@@ -20,12 +20,13 @@ import tarfile
 
 import pandas as pd
 
-from . import dataset_v2, kpis, prb, run_profile, schema
+from . import dataset_v2, kpis, prb, run_profile, schema, ue_radio
 
 
 CONTROL_LOGS = (
     "run_timing.json", "rnti_map.csv", "prb_by_second.csv", "xapp.log",
     "channel_state.json", "ue_ips.txt", "dn_dl_tx.mgn", "deployment.log",
+    schema.UE_RADIO_BY_SECOND,
 )
 
 
@@ -158,9 +159,13 @@ def _label_channel(frame: pd.DataFrame, run_dir: Path) -> pd.DataFrame:
 def training_frame(run_dir) -> pd.DataFrame:
     """One row per measured UE/UTC second, suitable for model training."""
     run_dir = Path(run_dir)
-    radio = prb.prb_timeseries(run_dir)
-    if radio.empty and radio.attrs.get("error"):
-        raise ValueError(radio.attrs["error"])
+    mac_radio = prb.prb_timeseries(run_dir)
+    if mac_radio.empty and mac_radio.attrs.get("error"):
+        raise ValueError(mac_radio.attrs["error"])
+    serving_radio = ue_radio.timeseries(run_dir)
+    if serving_radio.empty and serving_radio.attrs.get("error"):
+        raise ValueError(serving_radio.attrs["error"])
+    radio = ue_radio.merge_with_mac(mac_radio, serving_radio)
     traffic = _traffic_frame(run_dir)
     if radio.empty and traffic.empty:
         return pd.DataFrame()
@@ -234,6 +239,10 @@ def quality(run_dir: Path, features: pd.DataFrame) -> dict:
     expected_ues = len(_manifest(run_dir))
     measured_ues = int(features["ue"].nunique()) if not features.empty else 0
     radio_rows = int(features.get("dl_prb", pd.Series(dtype=float)).notna().sum())
+    ue_radio_rows = int(features.get(
+        "ss_rsrp_dbm", pd.Series(dtype=float)).notna().sum())
+    ue_radio_lag = pd.to_numeric(features.get(
+        "ue_radio_emit_lag_s", pd.Series(dtype=float)), errors="coerce").dropna().abs()
     channel_rows = int(features.get(
         "channel_verified", pd.Series(dtype=bool)).fillna(False).sum())
     dual_clock = all(column in features for column in prb.DUAL_CLOCK_COLUMNS)
@@ -256,6 +265,14 @@ def quality(run_dir: Path, features: pd.DataFrame) -> dict:
         "ue_coverage": (measured_ues / expected_ues if expected_ues else None),
         "feature_rows": len(features),
         "radio_rows": radio_rows,
+        "ue_radio_rows": ue_radio_rows,
+        "ue_radio_clock": "ue_clock_realtime_utc" if ue_radio_rows else "not captured",
+        "ue_radio_clock_valid": bool(
+            not ue_radio_rows or (len(ue_radio_lag) and ue_radio_lag.quantile(.95) <= .5)
+        ),
+        "ue_radio_emit_lag_s_p95": (
+            float(ue_radio_lag.quantile(.95)) if len(ue_radio_lag) else None
+        ),
         "radio_clock": "dual" if dual_clock else (
             "not captured" if not radio_rows else "legacy"),
         "radio_clock_valid": bool(dual_clock or not radio_rows),

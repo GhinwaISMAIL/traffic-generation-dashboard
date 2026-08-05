@@ -56,6 +56,10 @@ def sample_run(tmp_path):
         "utc_second,recv_tstamp_us,source_tstamp_us,nb_id,rnti,dl_aggr_prb,ul_aggr_prb,samples\n"
         "1000010,1000010000000,5000000,3584,100,10,20,1000\n"
         "1000011,1000011000000,5500000,3584,100,20,25,1000\n")
+    (logs / schema.UE_RADIO_BY_SECOND).write_text(
+        "utc_second,emitted_epoch_us,ue,cell,ue_index,ssb,samples,ss_rsrp_dbm,ss_rsrq_db,ss_sinr_db\n"
+        "1000010,1000011030000,ue1,1,1,0,15,-41,-10.47,48.1\n"
+        "1000011,1000012030000,ue1,1,1,0,15,-51,-10.46,38.1\n")
     (logs / "xapp.log").write_text(
         ("[xApp]: Successfully subscribed\n" * 4) +
         ("[xApp]: E42 SUBSCRIPTION DELETE RESPONSE rx\n" * 4) +
@@ -88,6 +92,7 @@ def test_training_frame_joins_radio_traffic_and_verified_channel(tmp_path):
     assert row["ue_class"] == "heavy"
     assert row["dl_prb"] == 10
     assert row["dl_mbps"] == 0.008
+    assert row["ss_rsrp_dbm"] == -51
     assert row["dl_noise_power_dB"] == -20
     assert bool(row["channel_verified"])
     partial = frame[frame["utc_second"] == 1_000_010].iloc[0]
@@ -163,12 +168,17 @@ def test_v2_packet_accounting_keys_segments_and_exact_percentile(tmp_path):
     assert not bool(ul["training_eligible"])
 
     treated = training[(training["direction"] == "dl") &
-                       (training["requested_value"] == -20)].iloc[0]
+                       (training["requested_value"] == -20)].sort_values(
+                           "segment_start_utc").iloc[-1]
     expected = packets.loc[
         (packets["sent_time_utc"] >= treated["segment_start_utc"]) &
         (packets["sent_time_utc"] < treated["segment_end_utc"]) &
         packets["received"], "latency_ms"].quantile(.95)
     assert treated["latency_ms_p95"] == pytest.approx(expected)
+    assert treated["ue_radio_samples"] > 0
+    assert treated["ss_rsrp_dbm_segment_mean"] == pytest.approx(-51)
+    assert bool(treated["ue_radio_clock_valid"])
+    assert treated["ue_radio_emit_lag_s_p95"] == pytest.approx(.03)
     radio_row = training[training["radio_join_clock"].notna()].iloc[0]
     assert radio_row["radio_join_clock"] == "core_receipt_utc"
     unmatched = dataset_v2.enrich_radio_clock_provenance(
