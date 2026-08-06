@@ -85,6 +85,56 @@ def sample_run(tmp_path):
     return run
 
 
+def sample_joint_channel_run(tmp_path, *, observed_ploss=-3):
+    run = sample_run(tmp_path)
+    (run / schema.CHANNEL_SCHEDULE).write_text(json.dumps({
+        "schema_version": 1,
+        "enabled": True,
+        "expected_model_type": "AWGN",
+        "events": [
+            {
+                "at_s": 0,
+                "target": "ue1",
+                "direction": "dl",
+                "parameter": "ploss",
+                "value": -3,
+            },
+            {
+                "at_s": 0,
+                "target": "ue1",
+                "direction": "dl",
+                "parameter": "noise_power_dB",
+                "value": -2,
+            },
+        ],
+    }))
+    model = {
+        "target": "ue1",
+        "direction": "dl",
+        "model_type": "AWGN",
+        "model_name": "rfsimu_channel_enB0",
+        "model_index": 0,
+    }
+    (run / schema.LOGS_DIR / "channel_state.json").write_text(json.dumps({
+        "success": True,
+        "traffic_start_reference_epoch": 1_000_009.0,
+        "initial_state": [
+            {
+                **model,
+                "parameter": "ploss",
+                "observed": observed_ploss,
+            },
+            {
+                **model,
+                "parameter": "noise_power_dB",
+                "observed": -2,
+            },
+        ],
+        "transitions": [],
+    }))
+    return run
+
+
 def test_training_frame_joins_radio_traffic_and_verified_channel(tmp_path):
     frame = dataset.training_frame(sample_run(tmp_path))
     row = frame[frame["utc_second"] == 1_000_011].iloc[0]
@@ -194,6 +244,55 @@ def test_v2_packet_accounting_keys_segments_and_exact_percentile(tmp_path):
     assert "radio_clock_lag_warning" in contract["roles"]["quality_only"]
     assert "radio segment means use core receipt time" in " ".join(
         contract["rules"])
+
+
+def test_joint_channel_controls_share_one_training_segment(tmp_path):
+    tables = dataset_v2.build_tables(sample_joint_channel_run(tmp_path))
+    segments = tables[schema.CHANNEL_SEGMENTS]
+    training = tables[schema.SEGMENT_TRAINING_TABLE]
+    segment = segments[
+        segments["ue"].eq("ue1") & segments["direction"].eq("dl")
+    ].iloc[0]
+    trained = training[training["segment_id"].eq(segment["segment_id"])].iloc[0]
+
+    assert segment["parameter"] == "joint"
+    assert int(segment["control_count"]) == 2
+    assert segment["requested_channel_state"] == (
+        '{"noise_power_dB":-2,"ploss":-3}'
+    )
+    assert segment["applied_channel_state"] == (
+        '{"noise_power_dB":-2,"ploss":-3}'
+    )
+    assert segment["requested_ploss"] == -3
+    assert segment["applied_ploss"] == -3
+    assert segment["requested_noise_power_dB"] == -2
+    assert segment["applied_noise_power_dB"] == -2
+    assert bool(segment["ploss_verified"])
+    assert bool(segment["ploss_agreement"])
+    assert bool(segment["noise_power_dB_verified"])
+    assert bool(segment["noise_power_dB_agreement"])
+    assert bool(segment["channel_agreement"])
+    assert bool(segment["training_eligible"])
+    assert bool(trained["training_eligible"])
+
+    contract = dataset_v2.model_contract()
+    assert "requested_ploss" in contract["roles"]["pre_run_features"]
+    assert "requested_noise_power_dB" in contract["roles"]["pre_run_features"]
+
+
+def test_joint_channel_mismatch_rejects_the_complete_segment(tmp_path):
+    segments = dataset_v2.channel_segments(
+        sample_joint_channel_run(tmp_path, observed_ploss=-2))
+    segment = segments[
+        segments["ue"].eq("ue1") & segments["direction"].eq("dl")
+    ].iloc[0]
+
+    assert segment["requested_ploss"] == -3
+    assert segment["applied_ploss"] == -2
+    assert not bool(segment["ploss_agreement"])
+    assert bool(segment["noise_power_dB_agreement"])
+    assert not bool(segment["channel_agreement"])
+    assert not bool(segment["training_eligible"])
 
 
 def test_uncontrolled_run_uses_sender_start_for_channel_segments(tmp_path):

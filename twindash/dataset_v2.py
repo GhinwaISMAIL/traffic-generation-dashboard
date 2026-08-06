@@ -19,6 +19,7 @@ from . import kpis, prb, run_profile, schema, ue_radio
 QUARANTINED_RADIO_COLUMNS = (
     "wb_cqi_avg", "ul_bler_avg", "bsr_avg", "phr_avg",
 )
+AWGN_CONTROL_PARAMETERS = ("ploss", "noise_power_dB")
 
 
 def model_contract() -> dict:
@@ -44,11 +45,22 @@ def model_contract() -> dict:
         "roles": {
             "pre_run_features": [
                 "ue_class", "app_mix", "designed_offered_mbps",
-                "parameter", "requested_value",
+                "parameter", "requested_value", "requested_channel_state",
+                "requested_ploss", "requested_noise_power_dB",
             ],
             "conditional_pre_run_features": {
                 "applied_value": (
                     "usable only when verified=true and channel_agreement=true"
+                ),
+                "applied_channel_state": (
+                    "usable only when verified=true and channel_agreement=true"
+                ),
+                "applied_ploss": (
+                    "usable only when verified=true and ploss_agreement=true"
+                ),
+                "applied_noise_power_dB": (
+                    "usable only when verified=true and "
+                    "noise_power_dB_agreement=true"
                 ),
             },
             "targets": [
@@ -98,6 +110,7 @@ def model_contract() -> dict:
         "rules": [
             "segment latency percentiles are computed directly from packet rows",
             "DL and UL are never combined",
+            "joint channel controls remain in one segment row as a verified state vector",
             "UL is uncontrolled unless a verified stable UL mapping exists",
             "post-run radio outcomes are excluded from pre-run X",
             "radio segment means use core receipt time and carry explicit lag provenance",
@@ -322,6 +335,92 @@ def _state_start(run_dir: Path, state: dict) -> float:
     raise ValueError("cannot determine traffic start for channel segmentation")
 
 
+def _channel_control_fields(
+    controls: dict[str, dict], *, direction: str, state_success: bool
+) -> dict:
+    parameters = sorted(controls)
+    requested_state = {}
+    applied_state = {}
+    verified_state = {}
+    agreement_state = {}
+    for parameter in parameters:
+        item = controls[parameter]
+        observed = item.get("observed")
+        requested = item.get("requested", item.get("value", observed))
+        requested_state[parameter] = requested
+        applied_state[parameter] = observed
+        verified_state[parameter] = bool(
+            item.get("verified", True)
+            and item.get("status", "verified") == "verified"
+            and state_success
+        )
+        agreement_state[parameter] = _same_value(requested, observed)
+
+    model_items = list(controls.values())
+    model_names = {
+        str(item["model_name"]) for item in model_items if item.get("model_name")
+    }
+    model_types = {
+        str(item["model_type"]) for item in model_items if item.get("model_type")
+    }
+    model_indices = {
+        value for item in model_items
+        if (value := _number(item.get("model_index"))) is not None
+    }
+    model_name = next(iter(model_names)) if len(model_names) == 1 else None
+    model_type = next(iter(model_types)) if len(model_types) == 1 else None
+    model_index = next(iter(model_indices)) if len(model_indices) == 1 else None
+    model_mapping_valid = bool(
+        controls
+        and direction == "dl"
+        and model_name == "rfsimu_channel_enB0"
+        and model_index == 0
+    )
+    verified = bool(controls and all(verified_state.values()))
+    agreement = bool(controls and all(agreement_state.values()))
+
+    def encoded(values):
+        if not values:
+            return pd.NA
+        return json.dumps(values, sort_keys=True, separators=(",", ":"))
+
+    result = {
+        "control_count": len(parameters),
+        "parameter": (
+            parameters[0] if len(parameters) == 1
+            else "joint" if parameters else pd.NA
+        ),
+        "requested_value": (
+            requested_state[parameters[0]] if len(parameters) == 1 else pd.NA
+        ),
+        "applied_value": (
+            applied_state[parameters[0]] if len(parameters) == 1 else pd.NA
+        ),
+        "requested_channel_state": encoded(requested_state),
+        "applied_channel_state": encoded(applied_state),
+        "model_name": model_name,
+        "model_type": model_type,
+        "model_index": model_index,
+        "model_mapping_valid": model_mapping_valid,
+        "controlled": model_mapping_valid,
+        "verified": verified,
+        "channel_agreement": agreement,
+        "training_eligible": bool(
+            verified and agreement and model_mapping_valid
+        ),
+    }
+    for parameter in AWGN_CONTROL_PARAMETERS:
+        result[f"requested_{parameter}"] = requested_state.get(parameter, pd.NA)
+        result[f"applied_{parameter}"] = applied_state.get(parameter, pd.NA)
+        result[f"{parameter}_verified"] = bool(
+            verified_state.get(parameter, False)
+        )
+        result[f"{parameter}_agreement"] = bool(
+            agreement_state.get(parameter, False)
+        )
+    return result
+
+
 def channel_segments(run_dir) -> pd.DataFrame:
     """Build half-open verified channel intervals for every UE and direction."""
     run_dir = Path(run_dir)
@@ -401,41 +500,35 @@ def channel_segments(run_dir) -> pd.DataFrame:
                 item.get("applied_epoch") or item.get("scheduler_apply_epoch") or end))
 
             if not states and not changes:
-                rows.append({
+                row = {
                     "execution_id": execution, "profile_id": profile_id,
                     "segment_id": f"{execution}:{ue}:{direction}:0", "cell": cell,
                     "ue": ue, "ue_index": ue_index, "nb_id": nb_id,
                     "rnti": rnti, "direction": direction,
                     "segment_start_utc": start, "segment_end_utc": end,
-                    "duration_s": duration, "parameter": pd.NA,
-                    "requested_value": pd.NA, "applied_value": pd.NA,
-                    "model_name": pd.NA, "model_type": pd.NA,
-                    "model_index": pd.NA, "model_mapping_valid": False,
-                    "controlled": False, "verified": False,
-                    "channel_agreement": False, "training_eligible": False,
-                })
+                    "duration_s": duration,
+                }
+                row.update(_channel_control_fields(
+                    {}, direction=direction, state_success=state_success))
+                rows.append(row)
                 continue
 
-            current = dict(states[-1] if states else changes[0])
+            current = {
+                str(item["parameter"]): dict(item)
+                for item in states if item.get("parameter") is not None
+            }
+            if not current and changes:
+                first = changes[0]
+                if first.get("parameter") is not None:
+                    current[str(first["parameter"])] = dict(first)
             boundary = start
             segment_index = 0
             for change in changes + [None]:
                 next_boundary = end if change is None else float(
                     change.get("applied_epoch") or change.get("scheduler_apply_epoch") or end)
                 next_boundary = min(max(next_boundary, boundary), end)
-                observed = current.get("observed")
-                requested = current.get("requested", current.get("value", observed))
-                verified = bool(current.get("verified", True) and
-                                current.get("status", "verified") == "verified" and
-                                state_success)
-                agreement = _same_value(requested, observed)
-                model_index = _number(current.get("model_index"))
-                model_mapping_valid = bool(
-                    direction == "dl" and model_index == 0 and
-                    current.get("model_name") == "rfsimu_channel_enB0"
-                )
                 if next_boundary > boundary:
-                    rows.append({
+                    row = {
                         "execution_id": execution, "profile_id": profile_id,
                         "segment_id": f"{execution}:{ue}:{direction}:{segment_index}",
                         "cell": cell, "ue": ue, "ue_index": ue_index,
@@ -443,29 +536,32 @@ def channel_segments(run_dir) -> pd.DataFrame:
                         "direction": direction, "segment_start_utc": boundary,
                         "segment_end_utc": next_boundary,
                         "duration_s": next_boundary - boundary,
-                        "parameter": current.get("parameter"),
-                        "requested_value": requested, "applied_value": observed,
-                        "model_name": current.get("model_name"),
-                        "model_type": current.get("model_type"),
-                        "model_index": current.get("model_index"),
-                        "model_mapping_valid": model_mapping_valid,
-                        "controlled": model_mapping_valid,
-                        "verified": verified,
-                        "channel_agreement": agreement,
-                        "training_eligible": bool(
-                            verified and agreement and model_mapping_valid),
-                    })
+                    }
+                    row.update(_channel_control_fields(
+                        current, direction=direction,
+                        state_success=state_success))
+                    rows.append(row)
                     segment_index += 1
                 if change is None or next_boundary >= end:
                     break
-                current = dict(change)
+                parameter = change.get("parameter")
+                if parameter is not None:
+                    current[str(parameter)] = dict(change)
                 boundary = next_boundary
     result = pd.DataFrame(rows).sort_values(
         ["cell", "ue", "direction", "segment_start_utc"]
     ).reset_index(drop=True)
-    for column in ("requested_value", "applied_value", "model_index"):
+    numeric_controls = [
+        name for parameter in AWGN_CONTROL_PARAMETERS
+        for name in (f"requested_{parameter}", f"applied_{parameter}")
+    ]
+    for column in (
+            "requested_value", "applied_value", "model_index",
+            *numeric_controls):
         result[column] = pd.to_numeric(result[column], errors="coerce").astype(float)
-    for column in ("parameter", "model_name", "model_type"):
+    for column in (
+            "parameter", "requested_channel_state", "applied_channel_state",
+            "model_name", "model_type"):
         result[column] = result[column].astype("string")
     if result["segment_id"].duplicated().any():
         raise ValueError("channel segment identifier is not unique")

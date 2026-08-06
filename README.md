@@ -47,6 +47,10 @@ traffic_profiles/run_<id>/
       metadata.json
       ue_second_features.parquet
       observed_kpis.parquet
+      packet_outcomes.parquet
+      ue_app_second_observed.parquet
+      channel_segments.parquet
+      segment_training_table.parquet
       logs/                    # timing, mapping, xApp, PRB, channel provenance
 ```
 
@@ -69,6 +73,12 @@ PRB, BLER, and SNR means remain post-run diagnostics and must not be interpreted
 as instantaneous channel responses or included in pre-run model inputs when
 the warning is set. Exports derive these additive fields for older immutable V2
 archives from their frozen dual-clock feature table without changing checksums.
+
+When an AWGN segment controls both `ploss` and `noise_power_dB`, Dataset
+Contract V2 keeps the joint requested and applied state in one segment row. It
+also exposes separate numeric columns for each control. A joint segment is
+training-eligible only when every value was verified and every requested value
+agrees with its readback.
 
 `run_profile.json` is written when the experiment is launched. It snapshots the
 deployment type and measurement capabilities used for that run, so changing
