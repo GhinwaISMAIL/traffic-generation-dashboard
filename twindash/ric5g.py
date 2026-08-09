@@ -90,6 +90,7 @@ def environment(cfg: dict) -> dict[str, str]:
     cells = sorted(nodes.get("cells") or [], key=lambda c: int(c["cell"]))
     xapp = cfg.get("xapp") or {}
     ues = cfg.get("ues") or {}
+    clock = cfg.get("clock") or {}
     env = {
         "CORE_HOST": (nodes.get("core") or {}).get("ssh_host", ""),
         "NUM_CELLS": str(len(cells)),
@@ -102,6 +103,14 @@ def environment(cfg: dict) -> dict[str, str]:
             "remote_bin", "/local/repository/bin")),
         "DN_CONTAINER": str((cfg.get("dn") or {}).get(
             "container", "ric5g-oai-ext-dn")),
+        "CLOCK_GUARD": "1" if clock.get("guard_enabled", False) else "0",
+        "CLOCK_NTP_SERVER": str(clock.get("ntp_server", "155.98.33.74")),
+        "CLOCK_MAX_ABS_OFFSET_MS": str(clock.get(
+            "max_abs_offset_ms", 5.0)),
+        "CLOCK_MAX_OFFSET_SPREAD_MS": str(clock.get(
+            "max_offset_spread_ms", 5.0)),
+        "CLOCK_MAX_JITTER_MS": str(clock.get("max_jitter_ms", 1.0)),
+        "CLOCK_SYNC_TIMEOUT_S": str(clock.get("sync_timeout_s", 90.0)),
     }
     if cells:
         env["NB_ID_START"] = str(min(int(cell["nb_id"]) for cell in cells))
@@ -177,7 +186,9 @@ def expected_logs(run_dir, cfg: dict) -> set[str]:
         expected.update({f"{ue}_ul_tx.log", f"{ue}_dl_rx.log",
                          f"{ue}_radio.log"})
     if (cfg.get("xapp") or {}).get("enabled", True):
-        expected.update({"prb_by_second.csv", "xapp.log"})
+        expected.update({"prb_by_second.csv", "xapp.log", "rnti_map_post.csv"})
+    if (cfg.get("clock") or {}).get("guard_enabled", False):
+        expected.update({"clock_preflight.json", "clock_postflight.json"})
     schedule = Path(run_dir) / schema.CHANNEL_SCHEDULE
     if schedule.exists():
         try:

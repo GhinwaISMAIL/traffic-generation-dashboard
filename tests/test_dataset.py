@@ -150,6 +150,31 @@ def test_training_frame_joins_radio_traffic_and_verified_channel(tmp_path):
     assert not bool(partial["channel_verified"])
 
 
+def test_quality_records_clock_and_rnti_guards(tmp_path):
+    run = sample_run(tmp_path)
+    logs = run / schema.LOGS_DIR
+    gate = {
+        "passed": True,
+        "gate": {
+            "max_abs_offset_ms": 0.6,
+            "offset_spread_ms": 0.65,
+            "max_jitter_ms": 0.84,
+        },
+    }
+    (logs / "clock_preflight.json").write_text(json.dumps(gate))
+    (logs / "clock_postflight.json").write_text(json.dumps(gate))
+    (logs / "rnti_map_post.csv").write_bytes(
+        (logs / "rnti_map.csv").read_bytes())
+
+    result = dataset.quality(run, dataset.training_frame(run))
+
+    assert result["clock_guard"]["enabled"] is True
+    assert result["clock_guard"]["preflight_passed"] is True
+    assert result["clock_guard"]["postflight_passed"] is True
+    assert result["clock_guard"]["postflight_warnings"] == []
+    assert result["rnti_stability"] == {"checked": True, "stable": True}
+
+
 def test_archive_is_immutable_and_export_splits_by_execution(tmp_path):
     run = sample_run(tmp_path)
     first = dataset.archive_execution(run, include_raw=True)

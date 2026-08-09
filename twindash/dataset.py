@@ -233,6 +233,36 @@ def _xapp_quality(run_dir: Path) -> dict:
     }
 
 
+def _clock_guard_quality(run_dir: Path) -> dict:
+    logs = run_dir / schema.LOGS_DIR
+    preflight = _json(logs / "clock_preflight.json")
+    postflight = _json(logs / "clock_postflight.json")
+    enabled = preflight is not None or postflight is not None
+    return {
+        "enabled": enabled,
+        "preflight_passed": (
+            bool(preflight.get("passed")) if preflight is not None else None
+        ),
+        "postflight_passed": (
+            bool(postflight.get("passed")) if postflight is not None else None
+        ),
+        "preflight_gate": (preflight or {}).get("gate"),
+        "postflight_gate": (postflight or {}).get("gate"),
+        "preflight_warnings": (preflight or {}).get("warnings", []),
+        "postflight_warnings": (postflight or {}).get("warnings", []),
+    }
+
+
+def _rnti_stability_quality(run_dir: Path) -> dict:
+    logs = run_dir / schema.LOGS_DIR
+    before = logs / "rnti_map.csv"
+    after = logs / "rnti_map_post.csv"
+    if not after.exists():
+        return {"checked": False, "stable": None}
+    stable = before.exists() and before.read_bytes() == after.read_bytes()
+    return {"checked": True, "stable": stable}
+
+
 def quality(run_dir: Path, features: pd.DataFrame) -> dict:
     state = run_profile.channel_state(run_dir)
     schedule = _json(run_dir / schema.CHANNEL_SCHEDULE, {}) or {}
@@ -282,6 +312,8 @@ def quality(run_dir: Path, features: pd.DataFrame) -> dict:
         "channel_schedule_enabled": bool(schedule.get("enabled", False)),
         "channel_state_verified": bool(state and state.get("success")),
         "channel_transitions": len((state or {}).get("transitions") or []),
+        "clock_guard": _clock_guard_quality(run_dir),
+        "rnti_stability": _rnti_stability_quality(run_dir),
         "xapp": _xapp_quality(run_dir),
     }
 
