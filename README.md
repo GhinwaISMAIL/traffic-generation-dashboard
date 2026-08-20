@@ -179,15 +179,15 @@ runner and rebuilds `observed_kpis.parquet`.
 
 ## Validation and security
 
-Run the offline release gate before a merge or tagged release:
+Run the release-validation gate before a merge or tagged research release:
 
 ```bash
-bash bin/production-readiness.sh
+bash bin/release-validation.sh
 ```
 
 The gate compiles the Python code, runs the automated tests, smoke-tests all
 four Streamlit pages, and checks the CLI. See
-[PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for the live POWDER
+[RELEASE_VALIDATION.md](RELEASE_VALIDATION.md) for the live POWDER
 acceptance procedure and [SECURITY.md](SECURITY.md) for the supported deployment
 model.
 

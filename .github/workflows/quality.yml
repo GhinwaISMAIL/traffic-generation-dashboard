@@ -6,7 +6,7 @@ on:
     branches: [master, main]
 
 jobs:
-  production-readiness:
+  release-validation:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -19,6 +19,6 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev,export]"
-      - run: bash bin/production-readiness.sh
+      - run: bash bin/release-validation.sh
         env:
           TWINDASH_CHECK_PDF: "1"
