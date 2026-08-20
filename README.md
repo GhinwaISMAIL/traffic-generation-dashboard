@@ -147,8 +147,6 @@ therefore cannot reinterpret an archived run.
 - Runtime RFsim values are read back. Missing verification or disagreement
   between requested and applied values prevents the channel segment from being
   labeled as training-eligible.
-- Cross-node one-way latency requires synchronized clocks; request-response RTT
-  derived on one UE does not.
 - `rnti_map.csv` belongs to one run and must not be reused after UE
   reattachment.
 - Throughput is UDP payload goodput over the configured run duration.
