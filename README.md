@@ -25,15 +25,15 @@ described in [Citation](#citation).
 - Execution-level train, validation, and test splits that avoid within-run
   leakage.
 
+
 ## Architecture
 
-```mermaid
-flowchart LR
-    A["Trace-driven traffic models"] -->|"burst schedules"| B["TwinDash"]
-    B -->|"MGEN scripts and flow map"| C["OAI 5G SA + FlexRIC on POWDER"]
-    C -->|"logs, KPIs, and RF read-back"| B
-    B -->|"validated immutable snapshot"| D["Execution archive and Parquet export"]
-```
+![TwinDash architecture and experiment lifecycle](docs/images/twindash-architecture.png)
+
+TwinDash connects the trace-driven traffic-generation pipeline with OAI 5G SA,
+FlexRIC, RFsim, and MGEN on POWDER. Each execution is validated before its logs,
+identity mappings, RAN KPIs, RF labels, provenance, and Parquet tables are
+archived.
 
 The dashboard exposes the lifecycle through four pages:
 
