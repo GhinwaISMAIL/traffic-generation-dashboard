@@ -201,7 +201,7 @@ available yet and should be added here when assigned.
 
 ```bibtex
 @inproceedings{ismail2026twindash,
-  author    = {Ismail, Ghinwa and Si-Mohammed, Samir and Theoleyre, Fabrice},
+  author    = {Ghinwa Ismail and Samir Si-Mohammed and Fabrice Theoleyre},
   title     = {{Demo: TwinDash -- a Dashboard-Based Traffic Generator for Reproducible 5G Experiments}},
   booktitle = {Proceedings of the IEEE Conference on Local Computer Networks (LCN)},
   year      = {2026},
