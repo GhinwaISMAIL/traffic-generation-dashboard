@@ -209,9 +209,6 @@ available yet and should be added here when assigned.
 }
 ```
 
-GitHub can also generate a citation from [`CITATION.cff`](CITATION.cff). After
-the camera-ready paper and software release are archived, update both citation
-records with the final DOI, page numbers, release tag, and release date.
 
 ## License
 
