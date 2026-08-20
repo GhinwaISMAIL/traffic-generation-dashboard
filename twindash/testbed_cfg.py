@@ -173,6 +173,14 @@ def build_ric5g(*, username, n_ue, core_host, cell_hosts,
             "ul_port": 5000,
             "dl_port": 5001,
         },
+        "clock": {
+            "guard_enabled": True,
+            "ntp_server": "155.98.33.74",
+            "max_abs_offset_ms": 5.0,
+            "max_offset_spread_ms": 5.0,
+            "max_jitter_ms": 1.0,
+            "sync_timeout_s": 90.0,
+        },
         "ric": {
             "e2_port": 36421,
             "e42_port": 36422,
@@ -261,6 +269,20 @@ def validate(cfg, allow_placeholder) -> list:
             errs.append(
                 f"expected_subscriptions must be {expected_subscriptions} "
                 f"for {len(cells)} cell(s)")
+        clock = cfg.get("clock") or {}
+        if clock.get("guard_enabled", False):
+            for field in (
+                "max_abs_offset_ms", "max_offset_spread_ms",
+                "max_jitter_ms", "sync_timeout_s",
+            ):
+                try:
+                    valid = float(clock.get(field, 0)) > 0
+                except (TypeError, ValueError):
+                    valid = False
+                if not valid:
+                    errs.append(f"clock {field} must be positive")
+            if not str(clock.get("ntp_server") or "").strip():
+                errs.append("clock ntp_server is required")
     else:
         host = cfg["dn"]["ssh_host"]
         after = host.split("@", 1)[1] if "@" in host else host

@@ -39,6 +39,9 @@ def test_runner_environment_comes_from_config():
     assert env["CELL2_HOST"] == "ghinwa@pc11-fort.emulab.net"
     assert env["NB_ID_START"] == "3584"
     assert env["XAPP_SUBS"] == "8"
+    assert env["CLOCK_GUARD"] == "1"
+    assert env["CLOCK_NTP_SERVER"] == "155.98.33.74"
+    assert env["CLOCK_MAX_OFFSET_SPREAD_MS"] == "5.0"
 
 
 def test_three_cells_map_and_export_all_hosts():
@@ -67,6 +70,13 @@ def test_duplicate_cell_host_is_rejected():
     cfg["nodes"]["cells"][1]["ssh_host"] = cfg["nodes"]["cells"][0]["ssh_host"]
     errors = testbed_cfg.validate(cfg, allow_placeholder=False)
     assert any("must be distinct" in error for error in errors)
+
+
+def test_invalid_clock_threshold_is_rejected():
+    cfg = config()
+    cfg["clock"]["max_jitter_ms"] = 0
+    errors = testbed_cfg.validate(cfg, allow_placeholder=False)
+    assert "clock max_jitter_ms must be positive" in errors
 
 
 def test_nested_duration_is_supported(tmp_path):
