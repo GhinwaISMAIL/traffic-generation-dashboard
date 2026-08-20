@@ -1,22 +1,97 @@
-# twindash
+# TwinDash
 
-`twindash` is the local integration layer between the multimodal MGEN pipeline
-and POWDER. The notebooks design a run, the distributed runner operates the
-core/cell nodes and FlexRIC xApp, and the dashboard reads the resulting run
-folder. The CLI and Streamlit use the same Python modules and configuration.
+[![Quality](https://github.com/GhinwaISMAIL/traffic-generation-dashboard/actions/workflows/quality.yml/badge.svg)](https://github.com/GhinwaISMAIL/traffic-generation-dashboard/actions/workflows/quality.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## Repository connections
+TwinDash is a dashboard-based framework for designing, executing, validating,
+and archiving reproducible 5G experiments. It connects trace-driven burst
+traffic models and MGEN with OpenAirInterface (OAI) 5G Standalone, RFsim, and
+FlexRIC on the POWDER testbed.
 
-1. `dashboard_config.yaml` points `profiles_dir` at the traffic pipeline's
-   `traffic_profiles/` directory.
-2. The Testbed page writes the pipeline repository's gitignored
-   `testbed_config.yaml`.
-3. For `powder_ric5g_distributed`, `twindash` launches the pipeline's tracked
-   `deploy_ric5g.sh`. That script uses SSH to the core and 1–3 selected cells and calls
-   `/local/repository/bin/mgen-{core,cell}.sh` on the nodes.
-4. The runner collects MGEN logs, the per-run RNTI map, xApp output, compact PRB
-   CSV, and clock anchors into `<run>/logs/`. Results are then local and
-   reproducible; Streamlit never queries a live SQLite database.
+TwinDash is the software described in the accepted IEEE LCN 2026 demo paper
+**“Demo: TwinDash – a Dashboard-Based Traffic Generator for Reproducible 5G
+Experiments.”** If you use this code in academic work, please cite the demo as
+described in [Citation](#citation).
+
+## Main capabilities
+
+- Multi-cell, multi-UE, and multi-application scenario design.
+- Trace-driven burst schedules translated into MGEN workloads.
+- OAI 5G SA experiment orchestration on reserved POWDER nodes.
+- Scheduled RFsim changes whose applied state is read back and verified.
+- Per-UE application, traffic, channel, and RAN KPI reconstruction.
+- Provenance-aware immutable execution archives and Parquet dataset export.
+- Execution-level train, validation, and test splits that avoid within-run
+  leakage.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A["Trace-driven traffic models"] -->|"burst schedules"| B["TwinDash"]
+    B -->|"MGEN scripts and flow map"| C["OAI 5G SA + FlexRIC on POWDER"]
+    C -->|"logs, KPIs, and RF read-back"| B
+    B -->|"validated immutable snapshot"| D["Execution archive and Parquet export"]
+```
+
+The dashboard exposes the lifecycle through four pages:
+
+1. **Design** defines cells, UEs, applications, traffic classes, duration, and
+   temporal parameters.
+2. **Testbed** maps the scenario to POWDER nodes and defines optional verified
+   RFsim transitions.
+3. **Results** executes or inspects a workload, validates the collected
+   evidence, and reconstructs cross-layer KPIs.
+4. **Dataset** archives complete executions and exports selected runs as
+   model-ready Parquet datasets.
+
+## Companion traffic-generation repository
+
+TwinDash consumes the `traffic_profiles/` output produced by
+[multimodal-traffic-digital-twins](https://github.com/GhinwaISMAIL/multimodal-traffic-digital-twins).
+The two repositories have separate responsibilities:
+
+| Repository | Responsibility |
+| --- | --- |
+| `multimodal-traffic-digital-twins` | PCAP-derived flow and burst processing, clustering, Markov modeling, synthetic scenario generation, and MGEN export. |
+| `traffic-generation-dashboard` (TwinDash) | Scenario/testbed configuration, deployment, evidence validation, KPI reconstruction, immutable archives, and dataset export. |
+
+`dashboard_config.yaml` points TwinDash to the companion repository's
+`traffic_profiles/` directory. For the `powder_ric5g_distributed` profile,
+TwinDash also launches its tracked `deploy_ric5g.sh` runner.
+
+## Quick start
+
+```bash
+git clone https://github.com/GhinwaISMAIL/traffic-generation-dashboard.git
+cd traffic-generation-dashboard
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev,export]'
+cp dashboard_config.example.yaml dashboard_config.yaml
+```
+
+Set `profiles_dir` in `dashboard_config.yaml` to the companion repository's
+`traffic_profiles/` directory, then start the dashboard:
+
+```bash
+streamlit run dashboard/app.py
+```
+
+For a live experiment, configure only nodes reserved for your current POWDER
+experiment. Remote actions occur only after an explicit **Run** or **Fetch**
+action. Stored mode is local: point `profiles_dir` at a directory containing a
+previously completed run and inspect it from **Results** or **Dataset** without
+starting a new reservation.
+
+## Traffic backend compatibility
+
+TwinDash currently uses MGEN as its implemented and validated packet-generation
+backend. Application models are represented first as timed burst schedules and
+then translated into MGEN events. This separation allows future exporters, but
+the current release does not claim validated compatibility with iperf3, D-ITG,
+or another traffic backend.
 
 ## Run-folder contract
 
@@ -43,7 +118,7 @@ traffic_profiles/run_<id>/
     dn_*_*.log
     ue*_*_*.log
   executions/
-    mgen-<timestamp>/          # immutable snapshot of one real deployment
+    mgen-<timestamp>/          # immutable snapshot of one deployment
       metadata.json
       ue_second_features.parquet
       observed_kpis.parquet
@@ -51,75 +126,41 @@ traffic_profiles/run_<id>/
       ue_app_second_observed.parquet
       channel_segments.parquet
       segment_training_table.parquet
-      logs/                    # timing, mapping, xApp, PRB, channel provenance
+      logs/                    # timing, mapping, xApp, PRB, channel evidence
 ```
 
 `flow_batch_map.csv` is the authoritative packet-attribution key after UPF NAT.
-Ports stay shared by direction (UL 5000, DL 5001); flow IDs distinguish UE,
-application, direction, and batch.
+Ports remain shared by direction (UL 5000 and DL 5001); flow IDs distinguish
+UE, application, direction, and request batch.
 
-`run_timing.json` anchors each node's MGEN wall clock to epoch time. FlexRIC
-radio rows retain both the RFsim/service-model source timestamp and the core
-receipt timestamp. `utc_second` is derived only from receipt time, so MGEN
-throughput and PRB are joined on `(utc_second, ue)` without treating simulated
-radio time as UTC. Legacy single-clock PRB captures are visible as invalid but
-cannot be archived or exported into a training dataset.
+`run_profile.json` snapshots the deployment type and measurement capabilities
+used for that execution. Changing the active testbed configuration later
+therefore cannot reinterpret an archived run.
 
-RFsim source time can advance more slowly than host UTC. Dataset Contract V2
-therefore records receipt-minus-source lag mean/p95/max, the source/wall ratio,
-the explicit `core_receipt_utc` join clock, and a lag warning on segment rows.
-This divergence is not an E2 transport-delay estimate. Receipt-aligned MCS,
-PRB, BLER, and SNR means remain post-run diagnostics and must not be interpreted
-as instantaneous channel responses or included in pre-run model inputs when
-the warning is set. Exports derive these additive fields for older immutable V2
-archives from their frozen dual-clock feature table without changing checksums.
+## Measurement and provenance safeguards
 
-When an AWGN segment controls both `ploss` and `noise_power_dB`, Dataset
-Contract V2 keeps the joint requested and applied state in one segment row. It
-also exposes separate numeric columns for each control. A joint segment is
-training-eligible only when every value was verified and every requested value
-agrees with its readback.
+- MGEN wall clocks are anchored to epoch time in `run_timing.json`.
+- FlexRIC rows retain both RFsim/service-model source time and core receipt
+  time; the explicit receipt clock is used for per-second traffic/RAN joins.
+- Legacy single-clock radio captures remain visible but cannot be archived as
+  valid cross-layer training data.
+- Runtime RFsim values are read back. Missing verification or disagreement
+  between requested and applied values prevents the channel segment from being
+  labeled as training-eligible.
+- Cross-node one-way latency requires synchronized clocks; request-response RTT
+  derived on one UE does not.
+- `rnti_map.csv` belongs to one run and must not be reused after UE
+  reattachment.
+- Throughput is UDP payload goodput over the configured run duration.
 
-`run_profile.json` is written when the experiment is launched. It snapshots the
-deployment type and measurement capabilities used for that run, so changing
-`testbed_config.yaml` later cannot reinterpret historical results. RFsim and
-COTS runs show their MGEN traffic KPIs; RIC5G runs additionally expose channel
-context, RIC/xApp health, PRB, and bits/PRB when xApp collection was enabled.
-Legacy runs without this file are labelled as inferred and use only the
-artifacts that are actually present.
+Receipt-aligned MCS, PRB, BLER, and SNR are post-run diagnostics. When a
+source/receipt-clock divergence warning is present, these values must not be
+interpreted as instantaneous channel responses or used as pre-run model
+inputs.
 
-## Setup
+## Command-line interface
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev,export]'
-cp dashboard_config.example.yaml dashboard_config.yaml
-streamlit run dashboard/app.py
-```
-
-Set `profiles_dir` in `dashboard_config.yaml`, then use:
-
-- **Design** to choose 1–3 cells, set the common UEs-per-cell reservation, and
-  give every cell its own class distribution or named traffic profiles before
-  writing `scenario_config.yaml` for the notebook pipeline;
-- **Testbed** to enter the current core/cell POWDER hostnames and, only for the
-  RIC5G profile, declare a boot-model expectation and schedule verified per-UE
-  downlink or per-cell uplink parameter changes on the traffic clock;
-- **Results** to run the configured experiment, validate collected logs,
-  rebuild KPIs, and view only the KPI sections supported by that run's saved
-  deployment profile;
-- **Dataset** to inspect the latest capture's UE coverage, flow/radio/channel
-  row counts, provenance, feature completeness, and sample training rows before
-  archiving it; curated executions can then be exported as model-ready Parquet
-  tables. Train/validation/test assignment is by execution ID, which prevents
-  seconds from the same run leaking across splits.
-
-The sidebar follows the run lifecycle: **Design → Testbed → Results → Dataset**.
-Channel control is intentionally part of Testbed rather than a separate page,
-because only the RIC5G distributed profile supports it.
-
-## CLI
+The CLI and Streamlit dashboard use the same Python modules and configuration:
 
 ```bash
 python -m twindash.cli list
@@ -134,22 +175,46 @@ python -m twindash.cli kpis <run_name>
 ```
 
 `preflight` is local and side-effect free. `deploy` runs the remote experiment,
-rebuilds flow KPIs, and immediately creates an immutable execution archive.
-For the distributed profile, `fetch` verifies the artifacts already collected
-by the runner and then builds `observed_kpis.parquet`.
+rebuilds flow KPIs, and creates an immutable execution archive. For a
+distributed RIC5G run, `fetch` verifies artifacts already collected by the
+runner and rebuilds `observed_kpis.parquet`.
 
-## Measurement notes
+## Validation and security
 
-- Throughput is UDP payload goodput over the configured run duration.
-- Cross-node one-way latency requires synchronized clocks; request-response RTT
-  derived on one UE does not.
-- `rnti_map.csv` is a per-run snapshot. Never reuse it after UE reattachment.
-- RIC5G channel family (`AWGN`, `TDL_*`, and similar) is selected at boot. The
-  runtime schedule changes only readable numeric parameters. Every transition
-  is read back; a missing verification fails deployment rather than producing
-  an incorrect training label. Exact settings are displayed only when the run
-  contains a successful `logs/channel_state.json`.
-- The xApp should run in a bounded window because raw `MAC_UE` data is roughly
-  1 kHz per attached UE. The runner aggregates on the core before transfer.
-  Counter deltas whose receipt interval is outside 0.5–1.5 seconds are excluded
-  from one-second bits/PRB joins and reported in Results.
+Run the offline release gate before a merge or tagged release:
+
+```bash
+bash bin/production-readiness.sh
+```
+
+The gate compiles the Python code, runs the automated tests, smoke-tests all
+four Streamlit pages, and checks the CLI. See
+[PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for the live POWDER
+acceptance procedure and [SECURITY.md](SECURITY.md) for the supported deployment
+model.
+
+## Citation
+
+If you use TwinDash or any part of this repository in a publication, please
+cite the accepted demo paper. The DOI and final proceedings metadata are not
+available yet and should be added here when assigned.
+
+```bibtex
+@inproceedings{ismail2026twindash,
+  author    = {Ismail, Ghinwa and Si-Mohammed, Samir and Theoleyre, Fabrice},
+  title     = {{Demo: TwinDash -- a Dashboard-Based Traffic Generator for Reproducible 5G Experiments}},
+  booktitle = {Proceedings of the IEEE Conference on Local Computer Networks (LCN)},
+  year      = {2026},
+  note      = {Accepted demo paper; DOI and final bibliographic details forthcoming}
+}
+```
+
+GitHub can also generate a citation from [`CITATION.cff`](CITATION.cff). After
+the camera-ready paper and software release are archived, update both citation
+records with the final DOI, page numbers, release tag, and release date.
+
+## License
+
+TwinDash is licensed under the [Apache License 2.0](LICENSE). The citation
+request above is scholarly attribution guidance; it does not add a condition
+to the Apache-2.0 license.

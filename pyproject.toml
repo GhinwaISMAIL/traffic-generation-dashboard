@@ -5,8 +5,34 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "twindash"
 version = "0.1.0"
-description = "Integration layer between the MGEN traffic-gen pipeline and the POWDER testbed"
+description = "Dashboard-based orchestration of trace-driven traffic and reproducible OAI 5G experiments"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Ghinwa Ismail"},
+    {name = "Samir Si-Mohammed"},
+    {name = "Fabrice Theoleyre"},
+]
 requires-python = ">=3.10"
+keywords = [
+    "5G",
+    "OpenAirInterface",
+    "FlexRIC",
+    "MGEN",
+    "POWDER",
+    "traffic generation",
+    "reproducible research",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "pandas",
     "pyarrow",
@@ -21,6 +47,11 @@ dev = ["pytest"]
 
 [project.scripts]
 twindash = "twindash.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/GhinwaISMAIL/traffic-generation-dashboard"
+Repository = "https://github.com/GhinwaISMAIL/traffic-generation-dashboard"
+Issues = "https://github.com/GhinwaISMAIL/traffic-generation-dashboard/issues"
 
 [tool.setuptools]
 packages = ["twindash"]

@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: >-
+  If you use TwinDash or any part of this software in academic work, please
+  cite the accepted demo paper below.
+title: "TwinDash: a Dashboard-Based Traffic Generator for Reproducible 5G Experiments"
+type: software
+authors:
+  - family-names: Ismail
+    given-names: Ghinwa
+  - family-names: Si-Mohammed
+    given-names: Samir
+  - family-names: Theoleyre
+    given-names: Fabrice
+version: 0.1.0
+repository-code: "https://github.com/GhinwaISMAIL/traffic-generation-dashboard"
+url: "https://github.com/GhinwaISMAIL/traffic-generation-dashboard"
+license: Apache-2.0
+keywords:
+  - 5G
+  - OpenAirInterface
+  - FlexRIC
+  - MGEN
+  - POWDER
+  - traffic generation
+  - reproducible research
+preferred-citation:
+  type: conference-paper
+  authors:
+    - family-names: Ismail
+      given-names: Ghinwa
+    - family-names: Si-Mohammed
+      given-names: Samir
+    - family-names: Theoleyre
+      given-names: Fabrice
+  title: "Demo: TwinDash – a Dashboard-Based Traffic Generator for Reproducible 5G Experiments"
+  collection-title: "Proceedings of the IEEE Conference on Local Computer Networks (LCN)"
+  year: 2026
