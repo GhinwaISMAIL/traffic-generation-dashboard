@@ -38,4 +38,4 @@ if [[ $# -gt 0 ]]; then
     "$PYTHON" -m twindash.cli preflight "$1"
 fi
 
-echo "PRODUCTION READINESS GATE PASSED"
+echo "RELEASE VALIDATION GATE PASSED"
