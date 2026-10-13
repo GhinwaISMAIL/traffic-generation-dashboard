@@ -98,136 +98,166 @@ def _load_events(run_dir: Path):
     return sent, recv
 
 
-def build_observed(run_dir) -> pd.DataFrame:
+def packet_records(run_dir) -> pd.DataFrame:
     run_dir = Path(run_dir)
-    sent, recv = _load_events(run_dir)
-    fbm = _flow_map(run_dir)
-    strays = 0
-
-    # Whole-run observed span (fallback duration).  Prefer absolute time because
-    # receive logs are written on three different nodes.
-    span = None
-    if not recv.empty:
-        absolute = recv.get("utc_time", pd.Series(dtype=float)).dropna()
-        clock = absolute if not absolute.empty else recv["time"].dropna()
-        if not clock.empty:
-            span = clock.max() - clock.min()
-    dur = run_duration(run_dir, observed_span=span) or 1.0
-
-    if not sent.empty:
-        sent = sent.merge(fbm, on=["flow_id", "direction"], how="left").dropna(subset=["ue"])
-        s = (sent.groupby(["flow_id", "direction", "ue", "app"])
-                 .agg(sent_packets=("seq", "count"), sent_bytes=("size", "sum"))
-                 .reset_index())
+    sent, received = _load_events(run_dir)
+    key = ["direction", "flow_id", "seq"]
+    columns = [*key, "ue", "app", "size_bytes", "sent_time_utc",
+               "received_time_utc", "sent_sod", "received_sod", "received",
+               "lost", "duplicate_receives", "latency_ms", "negative_latency",
+               "packet_clock_valid"]
+    if sent.empty:
+        if not received.empty:
+            raise ValueError("Receive events exist without transmitted packet logs")
+        return pd.DataFrame(columns=columns)
+    if sent[key].isna().any().any():
+        raise ValueError("Transmitted packets have missing identifiers")
+    if sent.duplicated(key).any():
+        raise ValueError("Duplicate transmitted packet identifiers prevent calculation")
+    sent = sent.reindex(columns=key + ["time", "utc_time", "size"]).rename(
+        columns={"time": "sent_sod", "utc_time": "sent_time_utc", "size": "size_bytes"})
+    if sent["size_bytes"].isna().any() or sent["size_bytes"].lt(0).any():
+        raise ValueError("Transmitted packets have missing or invalid payload sizes")
+    sent = sent.merge(_flow_map(run_dir), on=["direction", "flow_id"],
+                      how="left", validate="many_to_one")
+    if sent["ue"].isna().any():
+        raise ValueError("Transmitted packets have no matching UE in the flow map")
+    if received.empty:
+        rx = pd.DataFrame(columns=key + ["received_sod", "received_time_utc",
+                                        "received_size", "duplicate_receives", "received"])
     else:
-        s = pd.DataFrame(columns=["flow_id","direction","ue","app","sent_packets","sent_bytes"])
+        if received[key].isna().any().any():
+            raise ValueError("Received packets have missing identifiers")
+        rx = received.reindex(columns=key + ["time", "utc_time", "size"])
+        if rx["size"].isna().any() or rx["size"].lt(0).any():
+            raise ValueError("Received packets have missing or invalid payload sizes")
+        unknown = rx[key].merge(sent[key], on=key, how="left", indicator=True)
+        if unknown["_merge"].eq("left_only").any():
+            raise ValueError("Received packet identifiers have no matching SEND event")
+        duplicates = (rx.groupby(key).size() - 1).rename("duplicate_receives")
+        rx = (rx.sort_values(["utc_time", "time"]).drop_duplicates(key, keep="first")
+              .merge(duplicates, on=key, validate="one_to_one")
+              .rename(columns={"time": "received_sod", "utc_time": "received_time_utc",
+                               "size": "received_size"}))
+        rx["received"] = True
+    records = sent.merge(rx, on=key, how="left", validate="one_to_one")
+    records["received"] = records["received"].eq(True)
+    records["lost"] = ~records["received"]
+    records["duplicate_receives"] = records["duplicate_receives"].fillna(0).astype(int)
+    sizes = records["size_bytes"].notna() & records["received_size"].notna()
+    if records.loc[sizes, "size_bytes"].ne(records.loc[sizes, "received_size"]).any():
+        raise ValueError("Matched SEND/RECV packets have different payload sizes")
+    records["latency_ms"] = records.apply(
+        lambda row: mgen_log.elapsed_seconds(row["sent_sod"], row["received_sod"]),
+        axis=1) * 1000.0
+    anchored = records["sent_time_utc"].notna() & records["received_time_utc"].notna()
+    records.loc[anchored, "latency_ms"] = (
+        records.loc[anchored, "received_time_utc"] - records.loc[anchored, "sent_time_utc"]
+    ) * 1000.0
+    records["negative_latency"] = records["latency_ms"].lt(0)
+    records["packet_clock_valid"] = records["sent_time_utc"].notna() & (
+        records["lost"] | (anchored & ~records["negative_latency"]))
+    records.attrs["invalid_latency_packets"] = int((records["received"] & (
+        records["latency_ms"].isna() | records["negative_latency"])).sum())
+    records.attrs["unanchored_packets"] = int((records["received"] & ~anchored).sum())
+    return records[columns]
 
-    if not recv.empty:
-        fallback = recv.apply(
-            lambda row: mgen_log.elapsed_seconds(row.get("sent_time"),
-                                                 row.get("time")), axis=1)
-        recv["latency_ms"] = fallback * 1000.0
-        anchored = recv["utc_time"].notna() & recv["sent_utc_time"].notna()
-        recv.loc[anchored, "latency_ms"] = (
-            recv.loc[anchored, "utc_time"] -
-            recv.loc[anchored, "sent_utc_time"]) * 1000.0
-        recv = recv.merge(fbm, on=["flow_id", "direction"], how="left")
-        strays = int(recv["ue"].isna().sum())
-        recv = recv.dropna(subset=["ue"])
-        r = (recv.groupby(["flow_id", "direction", "ue", "app"])
-                 .agg(recv_packets=("seq", "count"),
-                      recv_bytes=("size", "sum"),
-                      latency_ms_mean=("latency_ms", "mean"),
-                      latency_ms_median=("latency_ms", "median"),
-                      latency_ms_p95=("latency_ms", lambda x: x.quantile(0.95)),
-                      jitter_ms=("latency_ms", "std"))
-                 .reset_index())
-        # run-average throughput: bytes over the RUN duration (comparable, additive)
-        r["recv_mbps"] = (r["recv_bytes"] * 8) / dur / 1e6
-    else:
-        r = pd.DataFrame(columns=["flow_id","direction","ue","app","recv_packets",
-                                  "recv_bytes","latency_ms_mean","latency_ms_median",
-                                  "latency_ms_p95","jitter_ms","recv_mbps"])
 
-    obs = r.merge(s, on=["flow_id", "direction", "ue", "app"], how="outer")
-    obs["sent_packets"] = obs["sent_packets"].fillna(0).astype(int)
-    obs["recv_packets"] = obs["recv_packets"].fillna(0).astype(int)
-    obs["loss"] = 1 - obs["recv_packets"] / obs["sent_packets"].replace(0, pd.NA)
+def summarize_packets(packets, group_by) -> pd.DataFrame:
+    columns = [*group_by, "sent_packets", "recv_packets", "sent_bytes", "recv_bytes",
+               "latency_ms_mean", "latency_ms_median", "latency_ms_p95", "jitter_ms", "loss"]
+    if packets.empty:
+        return pd.DataFrame(columns=columns)
+    frame = packets.copy()
+    frame["received_bytes"] = frame["size_bytes"].where(frame["received"], 0)
+    frame["valid_latency"] = frame["latency_ms"].where(
+        frame["received"] & frame["latency_ms"].ge(0))
+    result = (frame.groupby(group_by).agg(
+        sent_packets=("seq", "size"), recv_packets=("received", "sum"),
+        sent_bytes=("size_bytes", "sum"), recv_bytes=("received_bytes", "sum"),
+        latency_ms_mean=("valid_latency", "mean"),
+        latency_ms_median=("valid_latency", "median"),
+        latency_ms_p95=("valid_latency", lambda values: values.quantile(.95)),
+        jitter_ms=("valid_latency", "std")).reset_index())
+    result["loss"] = 1 - result["recv_packets"] / result["sent_packets"]
+    return result[columns]
+
+
+def _packet_duration(run_dir, packets):
+    clock = packets["received_time_utc"].dropna()
+    if clock.empty:
+        clock = packets["received_sod"].dropna()
+    span = float(clock.max() - clock.min()) if len(clock) else None
+    return run_duration(run_dir, observed_span=span)
+
+
+def build_observed(run_dir, *, packets=None) -> pd.DataFrame:
+    run_dir = Path(run_dir)
+    packets = packet_records(run_dir) if packets is None else packets
+    obs = summarize_packets(packets, ["flow_id", "direction", "ue", "app"])
+    duration = _packet_duration(run_dir, packets)
+    obs["recv_mbps"] = obs["recv_bytes"] * 8 / duration / 1e6 if duration and duration > 0 else float("nan")
     obs.insert(0, "run_id", run_dir.name)
-    obs.attrs["run_duration_s"] = dur
-    if strays:
-        obs.attrs["strays"] = strays
+    obs.attrs.update(packets.attrs)
+    obs.attrs["run_duration_s"] = duration
     return obs
 
 
 def by_ue(run_dir) -> pd.DataFrame:
-    """Per-UE rollup (sum over apps) — pairs with PRB (allocated per UE/RNTI)."""
-    obs = build_observed(run_dir)
-    if obs.empty:
-        return obs
-    g = (obs.groupby(["run_id", "ue", "direction"])
-             .agg(sent_packets=("sent_packets", "sum"),
-                  recv_packets=("recv_packets", "sum"),
-                  recv_bytes=("recv_bytes", "sum"),
-                  recv_mbps=("recv_mbps", "sum"),
-                  latency_ms_mean=("latency_ms_mean", "mean"),
-                  latency_ms_median=("latency_ms_median", "median"),
-                  latency_ms_p95=("latency_ms_p95", "max"))
-             .reset_index())
-    g["loss"] = 1 - g["recv_packets"] / g["sent_packets"].replace(0, pd.NA)
-    return g
+    run_dir = Path(run_dir)
+    packets = packet_records(run_dir)
+    result = summarize_packets(packets, ["ue", "direction"])
+    duration = _packet_duration(run_dir, packets)
+    result["recv_mbps"] = result["recv_bytes"] * 8 / duration / 1e6 if duration and duration > 0 else float("nan")
+    result.insert(0, "run_id", run_dir.name)
+    return result
+
+
+def packet_latency(run_dir, *, packets=None) -> pd.DataFrame:
+    packets = packet_records(run_dir) if packets is None else packets
+    valid = packets.loc[packets["received"] & packets["latency_ms"].ge(0)]
+    result = (valid.groupby(["ue", "direction"]).agg(
+        packets=("seq", "size"), latency_ms_p50=("latency_ms", "median"),
+        latency_ms_p95=("latency_ms", lambda values: values.quantile(.95))).reset_index())
+    result.attrs.update(packets.attrs)
+    return result
 
 
 def by_app(run_dir) -> pd.DataFrame:
-    """Per-app rollup (sum over UEs) — traffic characterization."""
     obs = build_observed(run_dir)
     if obs.empty:
         return obs
-    g = (obs.groupby(["run_id", "app", "direction"])
-             .agg(sent_packets=("sent_packets", "sum"),
-                  recv_packets=("recv_packets", "sum"),
-                  recv_bytes=("recv_bytes", "sum"),
-                  recv_mbps=("recv_mbps", "sum"))
-             .reset_index())
-    g["loss"] = 1 - g["recv_packets"] / g["sent_packets"].replace(0, pd.NA)
-    return g
+    result = (obs.groupby(["run_id", "app", "direction"])
+              .agg(sent_packets=("sent_packets", "sum"), recv_packets=("recv_packets", "sum"),
+                   recv_bytes=("recv_bytes", "sum"), recv_mbps=("recv_mbps", "sum"))
+              .reset_index())
+    result["loss"] = 1 - result["recv_packets"] / result["sent_packets"]
+    return result
 
 
-def throughput_timeseries(run_dir, window_s: float = 1.0, per: str = "ue") -> pd.DataFrame:
-    """Delivered throughput over fixed time windows — shows burst structure and
-    overlays against PRB. `per` is 'ue' (PRB-compatible), 'app', or 'flow'.
-
-    When logs/run_timing.json is present the windows are absolute epoch seconds
-    (`utc_second`), which is what PRB joins on; `t_s` is then that column made
-    relative for plotting. Without it only the relative `t_s` exists and the
-    PRB join is refused rather than silently misaligned."""
+def throughput_timeseries(run_dir, window_s: float = 1.0, per: str = "ue", *, packets=None) -> pd.DataFrame:
+    if window_s <= 0:
+        raise ValueError("Throughput window must be positive")
     run_dir = Path(run_dir)
-    _sent, recv = _load_events(run_dir)
-    if recv.empty:
-        return pd.DataFrame(columns=["t_s", per, "direction", "mbps"])
-    fbm = _flow_map(run_dir)
-    recv = recv.merge(fbm, on=["flow_id", "direction"], how="left").dropna(subset=["ue"])
+    packets = packet_records(run_dir) if packets is None else packets
+    recv = packets.loc[packets["received"]].copy()
     keycol = {"ue": "ue", "app": "app", "flow": "flow_id"}[per]
-    has_utc = "utc_time" in recv.columns and recv["utc_time"].notna().any()
-
+    if recv.empty:
+        return pd.DataFrame(columns=["t_s", keycol, "direction", "mbps"])
+    has_utc = recv["received_time_utc"].notna().all()
     if has_utc:
-        recv["win"] = (recv["utc_time"] // window_s) * window_s
+        recv["win"] = (recv["received_time_utc"] // window_s) * window_s
     else:
-        t0 = recv["time"].min()
-        recv["win"] = ((recv["time"] - t0) // window_s) * window_s
-
-    g = (recv.groupby(["win", keycol, "direction"])
-             .agg(bytes=("size", "sum")).reset_index())
-    g["mbps"] = (g["bytes"] * 8) / window_s / 1e6
-
-    cols = ["t_s", keycol, "direction", "mbps"]
+        recv["win"] = ((recv["received_sod"] - recv["received_sod"].min()) // window_s) * window_s
+    result = recv.groupby(["win", keycol, "direction"])["size_bytes"].sum().reset_index()
+    result["mbps"] = result.pop("size_bytes") * 8 / window_s / 1e6
     if has_utc:
-        g["utc_second"] = g["win"]
-        g["t_s"] = g["win"] - g["win"].min()
-        cols.append("utc_second")
+        result["utc_second"] = result["win"]
+        start = timing.load(run_dir).get("senders_start_epoch", result["win"].min())
+        result["t_s"] = result.pop("win") - float(start)
     else:
-        g = g.rename(columns={"win": "t_s"})
-    return g[cols]
+        result = result.rename(columns={"win": "t_s"})
+    return result
 
 
 def save_observed(run_dir) -> Path:

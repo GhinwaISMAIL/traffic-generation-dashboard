@@ -7,10 +7,14 @@ fields — and the previous file is backed up to scenario_config.yaml.bak first.
 """
 import copy
 from datetime import datetime
+import hashlib
+import json
+import os
+import tempfile
 
 import yaml
 
-from . import settings
+from . import schedule, settings
 
 DEFAULTS = {
     "simulation": {
@@ -58,7 +62,7 @@ def load() -> dict:
     return (yaml.safe_load(p.read_text()) or {}) if p.exists() else {}
 
 
-def merged() -> dict:
+def merged(*, profile_based=False) -> dict:
     """Existing config deep-merged over DEFAULTS, so every key is present."""
     def _merge(dst, src):
         for k, v in (src or {}).items():
@@ -67,6 +71,8 @@ def merged() -> dict:
             else:
                 dst[k] = v
     existing = load()
+    if profile_based and existing.get("scenario_source") == "measurement_driven":
+        existing = existing.get("profile_based_config") or {}
     base = copy.deepcopy(DEFAULTS)
     _merge(base, existing)
     old_sim = (existing.get("simulation") or {}) if existing else {}
@@ -184,5 +190,80 @@ def save(cfg):
               f"{datetime.now():%Y-%m-%d %H:%M}\n"
               "# Advanced blocks (app_affinity, *_override, *_thresholds) carried "
               "over from the previous file.\n\n")
-    p.write_text(header + yaml.safe_dump(cfg, sort_keys=False))
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=p.parent,
+                                     prefix=".scenario-", delete=False) as stream:
+        temporary = stream.name
+        stream.write(header + yaml.safe_dump(cfg, sort_keys=False))
+    try:
+        os.replace(temporary, p)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     return p
+
+
+def measurement_config(run_dir, *, random_seed=42):
+    import numpy as np
+    import pandas as pd
+    import pyarrow.parquet as pq
+
+    value = schedule.load_frozen(run_dir)
+    root = settings.repo_root().resolve()
+    source = (run_dir / schedule.SCHEDULE_CSV).resolve().relative_to(root).as_posix()
+    base = merged()
+    apps = sorted(value.sessions["traffic_model"].unique())
+    artifacts = {}
+    required = {"synthetic_flow_id", "synthetic_burst_idx", "on_dur_s",
+                "off_dur_s", "bytes", "packets"}
+    for app in apps:
+        artifacts[app] = {}
+        for direction in ("downlink", "uplink"):
+            folder = root / "artifacts" / app / direction
+            candidates = sorted(path for path in folder.glob("run_*") if path.is_dir())
+            path = None
+            if candidates:
+                for name in ("synth_test_bursts_mgen.parquet", "synth_test_bursts_markov.parquet"):
+                    candidate = candidates[-1] / "data" / name
+                    if candidate.is_file():
+                        path = candidate
+                        break
+            if path is None:
+                raise ValueError(f"{app}/{direction}: no generated burst artifact; prepare the model first")
+            parquet = pq.ParquetFile(path)
+            if not required <= set(parquet.schema_arrow.names) or not parquet.metadata.num_rows:
+                raise ValueError(f"{app}/{direction}: burst artifact is empty or has missing columns")
+            frame = parquet.read(columns=sorted(required)).to_pandas().apply(pd.to_numeric, errors="raise")
+            if (not np.isfinite(frame.to_numpy()).all() or (frame.on_dur_s <= 0).any()
+                    or (frame.off_dur_s < 0).any() or (frame.bytes <= 0).any()
+                    or (frame.packets < 1).any() or (frame.synthetic_flow_id % 1 != 0).any()):
+                raise ValueError(f"{app}/{direction}: invalid burst timing or packet values; "
+                                 "prepare valid burst artifacts before generation")
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            artifacts[app][direction] = {
+                "path": path.resolve().relative_to(root).as_posix(), "sha256": digest.hexdigest()}
+    seed = int(random_seed)
+    if seed != random_seed or not 0 <= seed < 2**32:
+        raise ValueError("random_seed must be an integer between 0 and 4294967295")
+    cfg = {
+        "scenario_source": "measurement_driven",
+        "profile_based_config": merged(profile_based=True),
+        "simulation": {"duration": value.logical_duration_s, "num_cells": 1,
+                       "ues_per_cell": len(value.ue_population), "n_ue": len(value.ue_population),
+                       "random_seed": seed},
+        "measurement_schedule": {
+            "schema_version": 1, "path": source,
+            "sha256": hashlib.sha256((run_dir / schedule.SCHEDULE_CSV).read_bytes()).hexdigest(),
+            "time_reference": "scenario_start", "allow_overlapping_sessions": True,
+            "byte_policy": "reference_only", "sampling_policy": "one_flow_per_session",
+            "ue_mapping": {name: f"ue{index}" for index, name in enumerate(value.ue_population, 1)},
+            "artifacts": artifacts,
+        },
+        "apps": apps, "network": copy.deepcopy(base["network"]),
+        "temporal_correlation": copy.deepcopy(base["temporal_correlation"]),
+    }
+    digest = hashlib.sha256(json.dumps(cfg, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    cfg["measurement_schedule"]["output_run"] = f"traffic_profiles/run_measurement_{digest[:20]}"
+    return cfg

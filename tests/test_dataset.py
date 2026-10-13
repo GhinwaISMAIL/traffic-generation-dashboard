@@ -85,6 +85,21 @@ def sample_run(tmp_path):
     return run
 
 
+def test_packet_export_and_dashboard_count_duplicate_receives_identically(tmp_path):
+    from twindash import kpis
+
+    run = sample_run(tmp_path)
+    log = run / "logs/ue1_dl_rx.log"
+    log.write_text(log.read_text() * 2)
+    exported = dataset_v2.packet_outcomes(run)
+    observed = kpis.build_observed(run)
+    assert len(exported) == 2
+    assert exported.duplicate_receives.sum() == 2
+    assert exported.received.sum() == observed.recv_packets.sum() == 2
+    assert exported.loc[exported.received, "size_bytes"].sum() == observed.recv_bytes.sum()
+    assert exported.latency_ms.quantile(.95) == pytest.approx(observed.latency_ms_p95.iloc[0])
+
+
 def sample_joint_channel_run(tmp_path, *, observed_ploss=-3):
     run = sample_run(tmp_path)
     (run / schema.CHANNEL_SCHEDULE).write_text(json.dumps({

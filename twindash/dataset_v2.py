@@ -202,55 +202,13 @@ def _designed_load(run_dir: Path) -> pd.DataFrame:
 def packet_outcomes(run_dir) -> pd.DataFrame:
     """Return one immutable row per transmitted packet."""
     run_dir = Path(run_dir)
-    sent, received = kpis._load_events(run_dir)  # shared parser, one clock contract
-    flow_map = kpis._flow_map(run_dir)
-    if sent.empty:
+    packets = kpis.packet_records(run_dir).rename(columns={"seq": "sequence"})
+    if packets.empty:
         return pd.DataFrame()
-
-    key = ["direction", "flow_id", "seq"]
-    if sent.duplicated(key).any():
-        examples = sent.loc[sent.duplicated(key, keep=False), key].head().to_dict("records")
-        raise ValueError(f"duplicate transmitted packet keys: {examples}")
-
-    metadata = [c for c in ("flow_id", "direction", "ue", "app") if c in flow_map]
-    sent = sent.merge(flow_map[metadata].drop_duplicates(["flow_id", "direction"]),
-                      on=["flow_id", "direction"], how="left", validate="many_to_one")
-    if sent["ue"].isna().any():
-        raise ValueError("one or more transmitted packets have no flow-map UE")
-
-    receive_columns = key + (["utc_time"] if "utc_time" in received else [])
-    if received.empty:
-        receives = pd.DataFrame(columns=key + ["received_time_utc", "duplicate_receives"])
-    else:
-        unknown = received.merge(flow_map[["flow_id", "direction"]].drop_duplicates(),
-                                 on=["flow_id", "direction"], how="left", indicator=True)
-        if (unknown["_merge"] == "left_only").any():
-            raise ValueError("one or more received packets have no flow-map entry")
-        receives = received[receive_columns].copy()
-        receives = receives.sort_values("utc_time")
-        duplicate_counts = (receives.groupby(key).size() - 1).rename(
-            "duplicate_receives")
-        receives = receives.drop_duplicates(key, keep="first").merge(
-            duplicate_counts, on=key, how="left")
-        receives = receives.rename(columns={"utc_time": "received_time_utc"})
-
-    packets = sent.merge(receives, on=key, how="left", validate="one_to_one")
-    packets = packets.rename(columns={
-        "seq": "sequence", "size": "size_bytes", "utc_time": "sent_time_utc",
-    })
-    packets["received"] = packets["received_time_utc"].notna()
-    packets["lost"] = ~packets["received"]
-    packets["duplicate_receives"] = packets.get(
-        "duplicate_receives", pd.Series(0, index=packets.index)).fillna(0).astype(int)
-    packets["latency_ms"] = (
-        packets["received_time_utc"] - packets["sent_time_utc"]
-    ) * 1000.0
-    packets["negative_latency"] = packets["latency_ms"].lt(0).fillna(False)
-    packets["packet_clock_valid"] = (
-        packets["sent_time_utc"].notna() &
-        (packets["lost"] | (packets["latency_ms"].notna() & ~packets["negative_latency"]))
-    )
-    packets["utc_second"] = packets["sent_time_utc"].map(math.floor).astype("Int64")
+    packets["latency_ms"] = packets["latency_ms"].where(
+        packets["sent_time_utc"].notna() & packets["received_time_utc"].notna())
+    packets["utc_second"] = packets["sent_time_utc"].map(
+        lambda value: math.floor(value) if pd.notna(value) else pd.NA).astype("Int64")
 
     packets = packets.merge(_ue_map(run_dir), on="ue", how="left")
     designed = _designed_load(run_dir)

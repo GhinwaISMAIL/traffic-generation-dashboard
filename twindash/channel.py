@@ -7,6 +7,9 @@ profile's uplink model is shared by every UE in a cell.
 """
 from __future__ import annotations
 
+import csv
+import fcntl
+import io
 import json
 import math
 from pathlib import Path
@@ -19,6 +22,7 @@ from . import kpis, ric5g, schema
 
 PARAMETERS = ("noise_power_dB", "ploss", "riceanf", "aoa", "offset", "forgetf")
 MODEL_TYPES = ("AWGN", "TDL_A", "TDL_B", "TDL_C", "EPA", "EVA", "ETU")
+CSV_COLUMNS = ("at_s", "target", "direction", "parameter", "value")
 
 
 def path(run_dir) -> Path:
@@ -52,6 +56,108 @@ def run_ues(run_dir) -> list[str]:
     if "ue_name" not in frame:
         return []
     return [str(value) for value in frame["ue_name"].dropna()]
+
+
+def ue_aliases(run_dir) -> dict[str, str]:
+    target = Path(run_dir) / "ue_mapping.csv"
+    if not target.exists():
+        return {}
+    frame = pd.read_csv(target, dtype=str, keep_default_na=False)
+    if not {"experimental_ue", "ue_name"} <= set(frame.columns):
+        raise ValueError("ue_mapping.csv needs experimental_ue and ue_name columns")
+    names = set(run_ues(run_dir))
+    aliases = {}
+    for row in frame.itertuples(index=False):
+        original, generated = row.experimental_ue.strip(), row.ue_name.strip()
+        if not original or generated not in names:
+            raise ValueError("ue_mapping.csv contains an empty or unknown UE")
+        if ((original in names and original != generated)
+                or (original in aliases and aliases[original] != generated)):
+            raise ValueError(f"ambiguous experimental UE identifier: {original}")
+        aliases[original] = generated
+    return aliases
+
+
+def load_csv(source, run_dir, cfg: dict, *, expected_model_type="AWGN") -> dict:
+    if isinstance(source, (str, Path)):
+        data = Path(source).expanduser().read_bytes()
+    elif isinstance(source, bytes):
+        data = source
+    elif hasattr(source, "getvalue"):
+        data = source.getvalue()
+    else:
+        data = source.read()
+    try:
+        text = data.decode("utf-8-sig") if isinstance(data, bytes) else data.lstrip("\ufeff")
+    except UnicodeDecodeError as exc:
+        raise ValueError("channel CSV must use UTF-8 encoding") from exc
+    aliases = ue_aliases(run_dir)
+    events = []
+    try:
+        reader = csv.reader(io.StringIO(text), strict=True)
+        columns = [value.strip() for value in next(reader, [])]
+        if len(columns) != len(set(columns)):
+            raise ValueError("channel CSV contains duplicate column names")
+        missing = set(CSV_COLUMNS) - set(columns)
+        extra = set(columns) - set(CSV_COLUMNS)
+        if missing or extra:
+            details = []
+            if missing:
+                details.append(f"missing columns: {', '.join(sorted(missing))}")
+            if extra:
+                details.append(f"unexpected columns: {', '.join(sorted(extra))}")
+            raise ValueError("channel CSV " + "; ".join(details))
+        for values in reader:
+            if not any(value.strip() for value in values):
+                continue
+            if len(values) != len(columns):
+                raise ValueError(f"CSV line {reader.line_num}: expected {len(columns)} fields")
+            row = dict(zip(columns, (value.strip() for value in values)))
+            if not all(row.values()):
+                raise ValueError(f"CSV line {reader.line_num}: all five fields are required")
+            try:
+                row["at_s"] = float(row["at_s"])
+                row["value"] = float(row["value"])
+            except ValueError as exc:
+                raise ValueError(f"CSV line {reader.line_num}: at_s and value must be numeric") from exc
+            row["direction"] = row["direction"].lower()
+            if row["direction"] == "dl":
+                row["target"] = aliases.get(row["target"], row["target"])
+            events.append(row)
+    except csv.Error as exc:
+        raise ValueError(f"invalid channel CSV: {exc}") from exc
+    value = expand_groups({
+        "schema_version": 1, "enabled": True,
+        "expected_model_type": expected_model_type, "events": events,
+    }, run_dir, cfg)
+    errors = validate(value, run_dir, cfg)
+    if errors:
+        detail = "\n- ".join(errors[:20])
+        remainder = f"\n({len(errors) - 20} more errors)" if len(errors) > 20 else ""
+        raise ValueError(f"invalid channel schedule:\n- {detail}{remainder}")
+    return normalized(value)
+
+
+def to_csv(schedule: dict) -> str:
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows({key: row[key] for key in CSV_COLUMNS}
+                     for row in schedule.get("events") or [])
+    return stream.getvalue()
+
+
+def deployment_active(run_dir) -> bool:
+    target = Path(run_dir) / schema.LOGS_DIR / "deployment.lock"
+    if not target.exists():
+        return False
+    with target.open("r") as stream:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    return False
 
 
 def topology(cfg: dict, run_dir) -> tuple[dict[str, dict], dict[int, dict]]:
@@ -208,7 +314,17 @@ def save(run_dir, schedule: dict, cfg: dict) -> Path:
     if errors:
         raise ValueError("invalid channel schedule:\n- " + "\n- ".join(errors))
     target = path(run_dir)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    temporary.replace(target)
+    logs = Path(run_dir) / schema.LOGS_DIR
+    logs.mkdir(exist_ok=True)
+    with (logs / "deployment.lock").open("a+") as stream:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("this run is being deployed; save channel changes after it finishes") from None
+        try:
+            temporary = target.with_suffix(target.suffix + ".tmp")
+            temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+            temporary.replace(target)
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
     return target

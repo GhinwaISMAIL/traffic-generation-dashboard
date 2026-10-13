@@ -68,6 +68,10 @@ def timeseries(run_dir) -> pd.DataFrame:
 
 
 def merge_with_mac(mac: pd.DataFrame, ue: pd.DataFrame) -> pd.DataFrame:
+    unmapped = 0
+    if not mac.empty:
+        unmapped = int(mac["ue"].isna().sum())
+        mac = mac.dropna(subset=["ue"]).copy()
     if mac.empty:
         result = ue.copy()
     elif ue.empty:
@@ -82,6 +86,7 @@ def merge_with_mac(mac: pd.DataFrame, ue: pd.DataFrame) -> pd.DataFrame:
             if other in result:
                 result[column] = result[column].fillna(result.pop(other))
     result.attrs.update(mac.attrs)
+    result.attrs["unmapped_mac_rows"] = unmapped
     if not ue.empty:
         result.attrs["ue_radio_clock_valid"] = ue.attrs.get("clock_valid")
         result.attrs["ue_radio_emit_lag_s_p95"] = ue.attrs.get("emit_lag_s_p95")

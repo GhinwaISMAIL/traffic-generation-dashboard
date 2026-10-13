@@ -267,6 +267,8 @@ def quality(run_dir: Path, features: pd.DataFrame) -> dict:
     state = run_profile.channel_state(run_dir)
     schedule = _json(run_dir / schema.CHANNEL_SCHEDULE, {}) or {}
     expected_ues = len(_manifest(run_dir))
+    mac = prb.prb_timeseries(run_dir)
+    unmapped_mac_rows = int(mac["ue"].isna().sum()) if not mac.empty else 0
     measured_ues = int(features["ue"].nunique()) if not features.empty else 0
     radio_rows = int(features.get("dl_prb", pd.Series(dtype=float)).notna().sum())
     ue_radio_rows = int(features.get(
@@ -295,6 +297,7 @@ def quality(run_dir: Path, features: pd.DataFrame) -> dict:
         "ue_coverage": (measured_ues / expected_ues if expected_ues else None),
         "feature_rows": len(features),
         "radio_rows": radio_rows,
+        "unmapped_mac_rows": unmapped_mac_rows,
         "ue_radio_rows": ue_radio_rows,
         "ue_radio_clock": "ue_clock_realtime_utc" if ue_radio_rows else "not captured",
         "ue_radio_clock_valid": bool(
@@ -307,6 +310,7 @@ def quality(run_dir: Path, features: pd.DataFrame) -> dict:
             "not captured" if not radio_rows else "legacy"),
         "radio_clock_valid": bool(dual_clock or not radio_rows),
         "source_wall_ratio": source_wall_ratio,
+        "radio_capture": prb.capture_quality(run_dir),
         **lag,
         "channel_labeled_rows": channel_rows,
         "channel_schedule_enabled": bool(schedule.get("enabled", False)),

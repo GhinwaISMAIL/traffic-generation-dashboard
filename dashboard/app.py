@@ -23,7 +23,7 @@ import yaml
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from twindash import (bursts, dataset, kpis, realized, ric5g, runs, scenario,
                       settings, testbed, testbed_cfg)  # noqa: E402
-from dashboard import channel_view, dataset_view, results_view  # noqa: E402
+from dashboard import channel_view, dataset_view, results_view, schedule_view
 
 PROFILES = settings.profiles_dir()
 
@@ -48,34 +48,35 @@ if page == "Results":
     distributed = ric5g.is_config(active_testbed)
     configured = bool(active_testbed.get("testbed"))
 
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Run configured experiment", disabled=not configured,
-                 help="Uses the profile and hosts currently saved on the Testbed page"):
-        try:
-            with st.spinner("Running the configured experiment on POWDER…"):
-                _, _, archived = testbed.run_and_archive(
-                    run_dir, active_testbed, include_raw=True)
-            st.success(
-                "Experiment completed; raw MGEN event logs, KPIs, and "
-                f"{archived.name} were archived before the run lock was released.")
-        except Exception as exc:
-            st.error(f"Experiment failed: {exc}")
-    fetch_label = "Verify collected logs" if distributed else "Fetch logs from testbed"
-    if c2.button(fetch_label, disabled=not configured):
-        try:
-            with st.spinner("Checking artifacts…" if distributed else
-                            "Copying logs back…"):
-                testbed.fetch_logs(run, run_dir, active_testbed)
+    with st.expander("Experiment actions", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        if c1.button("Run configured experiment", disabled=not configured,
+                     help="Uses the profile and hosts currently saved on the Testbed page"):
+            try:
+                with st.spinner("Running the configured experiment on POWDER…"):
+                    _, _, archived = testbed.run_and_archive(
+                        run_dir, active_testbed, include_raw=True)
+                st.success(
+                    "Experiment completed; raw MGEN event logs, KPIs, and "
+                    f"{archived.name} were archived before the run lock was released.")
+            except Exception as exc:
+                st.error(f"Experiment failed: {exc}")
+        fetch_label = "Verify collected logs" if distributed else "Fetch logs from testbed"
+        if c2.button(fetch_label, disabled=not configured):
+            try:
+                with st.spinner("Checking artifacts…" if distributed else
+                                "Copying logs back…"):
+                    testbed.fetch_logs(run, run_dir, active_testbed)
+                    kpis.save_observed(run_dir)
+                st.success("Artifacts verified and observed KPIs rebuilt.")
+            except Exception as exc:
+                st.error(f"Artifact verification failed: {exc}")
+        if c3.button("Rebuild KPIs from existing logs"):
+            try:
                 kpis.save_observed(run_dir)
-            st.success("Artifacts verified and observed KPIs rebuilt.")
-        except Exception as exc:
-            st.error(f"Artifact verification failed: {exc}")
-    if c3.button("Rebuild KPIs from existing logs"):
-        try:
-            kpis.save_observed(run_dir)
-            st.success("Rebuilt.")
-        except Exception as exc:
-            st.error(f"KPI rebuild failed: {exc}")
+                st.success("Rebuilt.")
+            except Exception as exc:
+                st.error(f"KPI rebuild failed: {exc}")
 
     results_view.render(run_dir)
 
@@ -90,11 +91,17 @@ elif page == "Dataset":
 
 elif page == "Design":
     st.title("Design a scenario")
+    source = st.radio(
+        "Scenario source", ["Profile-based generation", "Measurement-driven schedule"],
+        horizontal=True, key="scenario_source")
+    if source == "Measurement-driven schedule":
+        schedule_view.render()
+        st.stop()
     st.caption(f"Writes {settings.scenario_config_path()} — the file Notebook 1 "
                "reads. Advanced blocks are preserved; the previous file is backed "
                "up to .bak. After writing, re-run Notebook 1 \u2192 Notebook 2.")
 
-    base = scenario.merged()
+    base = scenario.merged(profile_based=True)
     discovered = scenario.discover_apps()
     if not discovered:
         st.warning(f"No apps discovered under {settings.artifacts_dir()} — check "
@@ -274,6 +281,9 @@ elif page == "Design":
     ul_port = pc[2].number_input("UL port (UE\u2192DN)", 1, 65535, int(net["ul_port"]))
 
     new_cfg = copy.deepcopy(base)  # carries the advanced blocks through untouched
+    new_cfg["scenario_source"] = "profile_based"
+    new_cfg.pop("measurement_schedule", None)
+    new_cfg.pop("profile_based_config", None)
     new_cfg["simulation"] = {
         "duration": int(duration), "num_cells": num_cells,
         "ues_per_cell": ues_per_cell, "n_ue": n_ue,

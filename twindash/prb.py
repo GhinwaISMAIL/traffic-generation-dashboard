@@ -9,6 +9,7 @@ Counters are cumulative within a UE's MAC context and reset on reattach, so a
 negative difference marks an epoch boundary rather than a measurement.
 """
 from pathlib import Path
+import json
 
 import pandas as pd
 
@@ -25,13 +26,22 @@ REQUIRED_PRB_COLUMNS = (
 )
 
 
-def clock_lag_summary(frame: pd.DataFrame, *, source_wall_ratio=None) -> dict:
-    """Describe RFsim source-clock divergence from the core receipt clock.
+def capture_quality(run_dir) -> dict:
+    path = Path(run_dir) / "logs" / "radio_capture_quality.json"
+    if not path.exists():
+        return {"timestamp_stage": "unverified", "complete": None}
+    try:
+        value = json.loads(path.read_text())
+        if not isinstance(value, dict):
+            raise ValueError("expected a JSON object")
+        return value
+    except (OSError, ValueError) as exc:
+        return {"timestamp_stage": "unverified", "complete": None,
+                "error": str(exc)}
 
-    This is not an E2 transport-latency estimate.  RFsim source time may advance
-    more slowly than host UTC, so the signed receipt-minus-source difference can
-    grow throughout a run even while indications continue arriving regularly.
-    """
+
+def clock_lag_summary(frame: pd.DataFrame, *, source_wall_ratio=None) -> dict:
+    """Compare report timestamps with recorded receipt timestamps."""
     result = {
         "radio_join_clock": None,
         "radio_clock_lag_samples": 0,
@@ -122,9 +132,9 @@ def prb_timeseries(run_dir) -> pd.DataFrame:
     if missing:
         if any(column in missing for column in DUAL_CLOCK_COLUMNS):
             return _empty(
-                "legacy PRB capture has no core receipt timestamp. Its service-model "
-                "timestamp is RFsim/radio time, not UTC; re-run after applying the "
-                "FlexRIC dual-clock patch and exclude this execution from training")
+                "legacy PRB capture has no core receipt timestamp. Timestamp "
+                "provenance cannot be verified; re-run with pre-queue receipt "
+                "timestamps and exclude this execution from aligned radio training")
         raise ValueError(f"prb_by_second.csv is missing columns: {missing}")
     if df.empty:
         return _empty()
@@ -161,7 +171,8 @@ def prb_timeseries(run_dir) -> pd.DataFrame:
         df["ue"] = df["rnti"].astype(str)
         df["mapped"] = False
 
-    df["t_s"] = df["utc_second"] - df["utc_second"].min()
+    start = timing.load(run_dir).get("senders_start_epoch", df["utc_second"].min())
+    df["t_s"] = df["utc_second"] - float(start)
     keep = ["utc_second", "t_s", *DUAL_CLOCK_COLUMNS, "receipt_interval_s",
             "ue", "mapped", "cell", "nb_id", "rnti", "dl_prb", "ul_prb",
             "samples"]
@@ -176,6 +187,7 @@ def prb_timeseries(run_dir) -> pd.DataFrame:
     out.attrs["source_span_s"] = float(source_span)
     out.attrs["source_wall_ratio"] = (
         float(source_span / receipt_span) if receipt_span > 0 else None)
+    out.attrs["capture_quality"] = capture_quality(run_dir)
     return out
 
 
@@ -231,6 +243,7 @@ def efficiency(run_dir, window_s: float = 1.0) -> pd.DataFrame:
     # dtype, which Kaleido's orjson serializer rejects during PDF export.
     j["bits_per_prb"] = (
         j["mbps"] * 1e6 * window_s) / j["prb"].replace(0, float("nan"))
-    j["t_s"] = j["utc_second"] - j["utc_second"].min()
+    start = timing.load(run_dir).get("senders_start_epoch", j["utc_second"].min())
+    j["t_s"] = j["utc_second"] - float(start)
     j.attrs.update(prb.attrs)
     return j

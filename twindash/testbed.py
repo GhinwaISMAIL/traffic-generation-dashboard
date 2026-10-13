@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from . import dataset, kpis, ric5g, run_profile, schema, settings
+from . import dataset, kpis, ric5g, run_profile, runs, schema, settings
 
 
 def load_testbed_config(path=None):
@@ -38,6 +38,7 @@ def _node_run_name(run_dir, fallback):
 def fetch_logs(run_name, run_dir, cfg):
     """Pull DN + UE logs into <run>/logs. Read-only on the testbed side.
     Handles RFsim (single node, logs in containers) and COTS (NUC files)."""
+    runs.require_generated(run_dir)
     # Preserve an existing deployment identity.  For a legacy run this action
     # is the first point where the dashboard knows which testbed supplied it.
     run_profile.record(run_dir, cfg, overwrite=False)
@@ -101,6 +102,7 @@ def run_script(path):
 
 def _dispatch_experiment(run_dir, cfg, *, on_success=None):
     """Dispatch a run and optionally freeze its outputs before ownership ends."""
+    runs.require_generated(run_dir)
     # testbed_config.yaml describes the next run and can change afterwards.
     # Snapshot it before dispatch so Results never depends on today's selection.
     run_profile.record(run_dir, cfg, overwrite=True)

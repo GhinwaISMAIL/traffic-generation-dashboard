@@ -44,3 +44,7 @@ def artifacts_dir() -> Path:
 def datasets_dir() -> Path:
     """Versioned dataset exports, kept outside individual traffic profiles."""
     return repo_root() / "datasets"
+
+
+def schedules_dir() -> Path:
+    return repo_root() / "schedules"

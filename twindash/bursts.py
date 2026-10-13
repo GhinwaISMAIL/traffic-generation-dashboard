@@ -12,7 +12,7 @@ import pandas as pd
 
 from . import schema
 
-_FN = re.compile(r"^(ue\d+)_([a-z0-9]+)_(dl|ul)_bursts$")
+_FN = re.compile(r"^(ue\d+)_([a-z0-9_]+)_(dl|ul)_bursts$")
 
 
 def load_bursts(run_dir) -> pd.DataFrame:

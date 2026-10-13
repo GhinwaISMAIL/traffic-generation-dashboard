@@ -36,3 +36,25 @@ def test_ue_radio_rejects_duplicate_ue_seconds(tmp_path):
 
     with pytest.raises(ValueError, match="duplicate"):
         ue_radio.timeseries(run)
+
+
+@pytest.mark.parametrize("serving_present", [True, False])
+def test_unmapped_cell_measurements_do_not_enter_ue_merge(serving_present):
+    mac = pd.DataFrame({"utc_second": [100, 100, 100], "ue": ["ue1", None, None],
+                        "rnti": [10, 20, 30], "dl_prb": [5, 6, 7]})
+    mac.attrs["clock_valid"] = True
+    ue = (pd.DataFrame({"utc_second": [100, 101], "ue": ["ue1", "ue1"],
+                        "ss_sinr_db": [30, 31]}) if serving_present else pd.DataFrame())
+    merged = ue_radio.merge_with_mac(mac, ue)
+    assert merged.ue.tolist() == (["ue1", "ue1"] if serving_present else ["ue1"])
+    assert merged.iloc[0].dl_prb == 5
+    assert merged.attrs["unmapped_mac_rows"] == 2
+    assert merged.attrs["clock_valid"] is True
+    assert len(mac) == 3
+
+
+def test_duplicate_mapped_mac_measurements_still_fail():
+    mac = pd.DataFrame({"utc_second": [100, 100], "ue": ["ue1", "ue1"], "dl_prb": [5, 6]})
+    ue = pd.DataFrame({"utc_second": [100], "ue": ["ue1"], "ss_sinr_db": [30]})
+    with pytest.raises(pd.errors.MergeError):
+        ue_radio.merge_with_mac(mac, ue)

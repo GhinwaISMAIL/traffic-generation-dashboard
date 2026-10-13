@@ -168,3 +168,27 @@ def test_success_callback_runs_before_deployment_lock_is_released(
     # The callback completed and the outer run then released the lock.
     with ric5g._deployment_lock(run / "logs"):
         pass
+
+
+def test_deployment_failure_reports_cause_and_preserves_log(tmp_path, monkeypatch):
+    run = tmp_path / "run_failed"
+    run.mkdir()
+    monkeypatch.setattr(ric5g, "validate_local", lambda *args: [])
+    lines = ["traffic finished\n", "ValueError: ue1 has only 439/86401 UE radio seconds\n",
+             "ERROR: the distributed MGEN run did not produce its complete log contract\n"]
+
+    class FailedProcess:
+        stdout = iter(lines)
+
+        def wait(self):
+            return 1
+
+    monkeypatch.setattr(ric5g.subprocess, "Popen", lambda *args, **kwargs: FailedProcess())
+    callbacks = []
+    with pytest.raises(RuntimeError, match="ue1 has only 439/86401") as error:
+        ric5g.run(run, config(), on_success=lambda: callbacks.append(True))
+    assert "deployment.log" in str(error.value)
+    assert (run / "logs/deployment.log").read_text() == "".join(lines)
+    assert not callbacks
+    with ric5g._deployment_lock(run / "logs"):
+        pass

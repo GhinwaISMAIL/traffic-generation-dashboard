@@ -183,10 +183,11 @@ def _radio_lag_note(quality: dict) -> str | None:
         measurements.append(f"source/wall ratio {float(ratio):.3f}")
     detail = "; ".join(measurements) or "source time is not near real time"
     return (
-        f"Radio clock warning: {detail}. This is RFsim source-clock dilation, "
-        "not an E2 network-delay estimate. Segment radio means use core receipt "
-        "UTC and are post-run diagnostics; do not interpret them as instantaneous "
-        "responses or use them in pre-run X."
+        f"Radio timestamp warning: {detail}. Database buffering or clock differences "
+        "can cause this divergence. It is not an E2 network-delay estimate or a "
+        "measurement of RFsim speed. Verify receipt timestamp provenance before interpreting "
+        "radio-to-traffic alignment. Segment radio means are post-run diagnostics; "
+        "do not use them in pre-run X."
     )
 
 

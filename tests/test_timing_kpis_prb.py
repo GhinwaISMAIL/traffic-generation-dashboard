@@ -72,6 +72,78 @@ def test_sender_and_receiver_use_their_own_clock_anchors(tmp_path):
     assert observed.loc[201, "latency_ms_median"] == pytest.approx(20.0)
 
 
+def test_packet_latency_respects_node_anchors(tmp_path):
+    result = kpis.packet_latency(sample_run(tmp_path)).set_index("ue")
+    assert result.loc["ue1", "latency_ms_p50"] == pytest.approx(10.0)
+    assert result.loc["ue13", "latency_ms_p95"] == pytest.approx(20.0)
+
+
+def test_duplicate_receives_do_not_inflate_delivery_or_throughput(tmp_path):
+    run = sample_run(tmp_path)
+    log = run / "logs/ue1_dl_rx.log"
+    log.write_text(log.read_text() * 2)
+    observed = kpis.build_observed(run).set_index("flow_id")
+    assert observed.loc[101, "recv_packets"] == 1
+    assert observed.loc[101, "loss"] == 0
+    assert observed.loc[101, "recv_mbps"] == pytest.approx(8000 / 60 / 1e6)
+    timeline = kpis.throughput_timeseries(run)
+    assert timeline.loc[timeline.direction.eq("dl"), "mbps"].sum() == pytest.approx(.008)
+    assert kpis.packet_records(run).duplicate_receives.sum() == 1
+
+
+def test_unmatched_and_size_mismatched_receives_are_rejected(tmp_path):
+    run = sample_run(tmp_path)
+    log = run / "logs/ue1_dl_rx.log"
+    original = log.read_text()
+    log.write_text(original.replace("seq>1", "seq>2"))
+    with pytest.raises(ValueError, match="no matching SEND"):
+        kpis.build_observed(run)
+    log.write_text(original.replace("size>1000", "size>900"))
+    with pytest.raises(ValueError, match="different payload sizes"):
+        kpis.build_observed(run)
+
+
+def test_missing_receives_are_loss_not_zero_latency(tmp_path):
+    run = sample_run(tmp_path)
+    (run / "logs/ue1_dl_rx.log").write_text("")
+    observed = kpis.build_observed(run).set_index("flow_id")
+    assert observed.loc[101, "sent_packets"] == 1
+    assert observed.loc[101, "recv_packets"] == 0
+    assert observed.loc[101, "loss"] == 1
+    assert pd.isna(observed.loc[101, "latency_ms_median"])
+    assert "ue1" not in set(kpis.packet_latency(run).ue)
+
+
+def test_packet_latency_weights_packets_and_deduplicates_receives(tmp_path, monkeypatch):
+    run = sample_run(tmp_path)
+    pd.DataFrame({"unique_flow_id": [101, 102], "ue_name": ["ue1", "ue1"],
+                  "app": ["video", "video"], "direction": ["dl", "dl"]}).to_csv(
+        run / "mgen_scripts/flow_batch_map.csv", index=False)
+    sent = pd.DataFrame({"direction": ["dl"] * 11, "flow_id": [101] * 10 + [102],
+                         "seq": list(range(10)) + [0], "time": [0.] * 11,
+                         "utc_time": [1000.] * 11})
+    received = sent.copy()
+    sent["size"] = 100
+    received["size"] = 100
+    received["time"] = [1.] * 10 + [.01]
+    received["utc_time"] += received["time"]
+    received = pd.concat([received, received.tail(1)], ignore_index=True)
+    monkeypatch.setattr(kpis, "_load_events", lambda path: (sent, received))
+    result = kpis.packet_latency(run)
+    assert result.iloc[0]["packets"] == 11
+    assert result.iloc[0]["latency_ms_p50"] == pytest.approx(1000.)
+    assert result.iloc[0]["latency_ms_p95"] == pytest.approx(1000.)
+    assert kpis.by_ue(run).iloc[0]["latency_ms_median"] == pytest.approx(1000.)
+    assert kpis.by_ue(run).iloc[0]["latency_ms_p95"] == pytest.approx(1000.)
+    received.loc[0, "utc_time"] = 999.
+    invalid = kpis.packet_latency(run)
+    assert invalid.attrs["invalid_latency_packets"] == 1
+    assert invalid.iloc[0]["packets"] == 10
+    sent.loc[1, "seq"] = 0
+    with pytest.raises(ValueError, match="Duplicate transmitted"):
+        kpis.packet_latency(run)
+
+
 def test_throughput_and_prb_join_on_absolute_second_and_direction(tmp_path):
     run = sample_run(tmp_path)
     throughput = kpis.throughput_timeseries(run)
@@ -95,6 +167,26 @@ def test_midnight_rollover_helpers():
     assert mgen_log.elapsed_seconds(86_399.9, 0.1) == pytest.approx(0.2)
 
 
+def test_traffic_and_radio_axes_share_the_run_start(tmp_path):
+    run = sample_run(tmp_path)
+    path = run / "logs/run_timing.json"
+    document = json.loads(path.read_text())
+    document["senders_start_epoch"] = 1_035_990
+    path.write_text(json.dumps(document))
+    for frame in (kpis.throughput_timeseries(run), prb.prb_timeseries(run), prb.efficiency(run)):
+        assert set(frame["t_s"]) == {10.0}
+
+
+def test_capture_quality_does_not_assume_legacy_timestamps_are_verified(tmp_path):
+    run = sample_run(tmp_path)
+    assert prb.capture_quality(run)["timestamp_stage"] == "unverified"
+    path = run / "logs/radio_capture_quality.json"
+    path.write_text(json.dumps({"timestamp_stage": "pre_queue_utc", "complete": True}))
+    assert prb.prb_timeseries(run).attrs["capture_quality"]["complete"] is True
+    path.write_text("[]")
+    assert "error" in prb.capture_quality(run)
+
+
 def test_duplicate_rnti_mapping_is_rejected(tmp_path):
     run = sample_run(tmp_path)
     with (run / "logs" / "rnti_map.csv").open("a") as stream:
@@ -110,7 +202,7 @@ def test_legacy_source_clock_is_rejected(tmp_path):
     frame.to_csv(path, index=False)
     radio = prb.prb_timeseries(run)
     assert radio.empty
-    assert "RFsim/radio time" in radio.attrs["error"]
+    assert "no core receipt timestamp" in radio.attrs["error"]
 
 
 def test_irregular_receipt_interval_is_not_joined_to_full_mgen_second(tmp_path):

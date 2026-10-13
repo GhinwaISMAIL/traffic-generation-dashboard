@@ -7,6 +7,7 @@ artifacts that the dashboard consumes afterwards.
 """
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
 import fcntl
 import json
@@ -165,13 +166,18 @@ def run(run_dir, cfg: dict, *, on_success=None):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1)
         assert process.stdout is not None
+        recent = deque(maxlen=50)
         for line in process.stdout:
+            recent.append(line.strip())
             print(line, end="", flush=True)
             output.write(line)
             output.flush()
         rc = process.wait()
         if rc:
-            raise subprocess.CalledProcessError(rc, cmd)
+            failures = [line for line in recent if line.startswith(
+                ("ValueError:", "RuntimeError:", "ERROR:", "Error:", "ssh:"))]
+            detail = failures[0] if failures else f"deployment exited with status {rc}"
+            raise RuntimeError(f"{detail}\nDeployment log: {deployment_log}") from None
         if on_success is not None:
             on_success()
     return deployment_log
