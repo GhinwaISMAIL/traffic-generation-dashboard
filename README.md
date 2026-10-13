@@ -93,6 +93,174 @@ then translated into MGEN events. This separation allows future exporters, but
 the current release does not claim validated compatibility with iperf3, D-ITG,
 or another traffic backend.
 
+## Measurement-driven schedule input
+
+On **Design**, select **Measurement-driven schedule** to upload a CSV or read a
+local CSV file. Uploaded CSV files can be up to 1 GB (1024 MB) each. The local
+file option is not subject to the upload limit; processing either input still
+depends on available memory. Profile-based generation remains the default.
+Schedule input does not use heavy/medium/light classes. Import freezes the input;
+**Write measurement-driven scenario** also updates `scenario_config.yaml`.
+
+The required columns are:
+
+```text
+session_id,experimental_ue,start_s,end_s,traffic_model,source_category,scenario_role
+```
+
+`session_id` must be nonempty and unique. Times are seconds from the logical
+scenario start or `HH:MM:SS`. The dashboard uses a 24-hour logical day and
+validates `0 <= start_s < end_s <= 86400`. Multiple sessions may overlap on one
+UE. The canonical `scenario_role` column contains `baseline` or `augmented`.
+The earlier `baseline_or_augmented` input name remains readable for
+compatibility, but normalized output always uses `scenario_role`.
+
+Paste the experimental UE identifiers from the frozen population, one per
+line. The list determines the UE count, including 6, 7, or 12 UEs. Each scheduled
+UE must belong to that independent list; identifiers are
+not inferred from the sessions. Population members without sessions are allowed.
+Application names must match discovered artifact folders or be mapped
+explicitly. An explicit mapping preserves the original name in
+`source_traffic_model`. Folder discovery does not validate model quality or the
+contents of generated artifacts.
+
+After all checks pass, **Schedule valid** appears with the logical duration,
+population size, scheduled UE count, total/baseline/augmented session counts,
+applications, earliest start, latest end, maximum concurrent UEs, and maximum
+simultaneous sessions on one UE. Concurrent UEs are counted distinctly even
+when one UE has several active sessions. Intervals use half-open boundaries:
+a session ending exactly when another starts does not overlap it. The table
+shows the first 20 normalized rows; the full schedule is retained for import.
+
+**Import measurement-driven schedule** freezes the normalized input under:
+
+```text
+traffic_profiles/run_schedule_<id>/
+    scenario_schedule.csv
+    scenario_schedule.json
+    scenario_schedule.sha256.json
+    config.json
+```
+
+The metadata records the original CSV checksum, normalized CSV checksum,
+independent UE population, recognized models, logical duration, and validation
+summary. Optional fields, including `source_session_id`, `parent_interval`, and
+`augmentation_iteration`, remain in the CSV. `source_session_id` may refer to
+upstream measured data and is not required to name another row in this import.
+
+Publication is atomic. Identical imports reuse the same run; changed inputs
+produce another run. Existing frozen files are verified and never overwritten.
+Use `schedule.load_frozen(run_dir)` downstream to verify the input checksums
+before reading the normalized sessions. The normalized CSV can also be
+downloaded directly.
+
+Imported runs have `generation_status: pending` and stay out of the Results,
+Dataset, and Testbed run selectors. Deployment and fetch actions reject them.
+
+To generate traffic, choose a seed and press **Write measurement-driven
+scenario**. The configuration points to the frozen CSV, records an explicit
+experimental-UE-to-`ue1`…`ueN` mapping, and pins the selected DL and UL burst
+artifacts by path and checksum. Both directional artifacts must exist and
+contain valid burst data. Network and temporal-correlation settings come from
+the saved configuration. The previous profile configuration is retained so
+returning to profile-based generation restores its settings.
+
+In the companion traffic-generator repository, run `build_scenario_1.ipynb`,
+then `mgen_script_2.ipynb`. The scenario builder samples one learned flow per
+session and direction, applies the existing application timing model within
+that session, and shifts its timestamps by `start_s`. It retains overlapping
+sessions and recomputes packet rates after fitting bursts to the session window.
+This policy does not fill the entire session continuously or force the generated
+byte count to match `source_traffic_bytes`; source demand remains a reference.
+
+Outputs go to `traffic_profiles/run_measurement_<id>/`, including the frozen
+schedule, `generation_config.json`, `ue_mapping.csv`, `ue_flow_assignments.csv`,
+burst tables, and the existing MGEN script/manifest layout. Session identifiers,
+roles, source-session references, and provenance are retained in the burst and
+flow maps. `session_generation.csv` compares source fields with generated DL/UL
+offered bytes. `designed_kpis.parquet` records offered load derived from the
+exported sender events. Actual sent/received traffic still requires a testbed run.
+
+The run stays `bursts_ready` until MGEN export succeeds, then becomes `complete`
+and appears in TwinDash. Identical requests reuse verified outputs; changes to
+the seed, configuration, or selected artifacts produce another run. The profile
+notebook path remains available and excludes schedule imports from automatic
+run selection. This bridge does not implement augmentation or radio replay.
+
+The integration test uses `TWINDASH_GENERATOR_REPO` when set, otherwise the
+configured generator repository. Run its standalone tests with the dashboard's
+Python environment, which provides pandas, NumPy, PyArrow, PyYAML, and pytest.
+
+The Python interface is available to analysis notebooks:
+
+```python
+from twindash import schedule
+
+plan = schedule.load("baseline12_augmented_schedule.csv", logical_duration_s=86400)
+plan = schedule.validate(plan, expected_ues=ue_population, available_models=application_models)
+summary = schedule.summary(plan)
+selected = schedule.execution_window(plan, 64800, 66600)
+run_dir = schedule.import_run(plan, profiles_dir, available_models=application_models)
+frozen_plan = schedule.load_frozen(run_dir)
+```
+
+Execution-window previews keep the original `start_s` and `end_s` and add
+`execution_start_s`, `execution_end_s`, and `session_offset_s`. A session already
+active at the window start retains its elapsed offset. Previewing a window does
+not compress time or regenerate a session from its beginning.
+
+## Channel schedules from calibrated CSV files
+
+On **Testbed → Channel schedule**, choose **Upload CSV** or **Local CSV file**
+to import a calibrated noise/path-loss timeline. The required columns are:
+
+```csv
+at_s,target,direction,parameter,value
+```
+
+Use `noise_power_dB` or `ploss` for the parameter. Downlink targets individual
+UEs; uplink targets cells. Experimental UE names are mapped using the selected
+run's `ue_mapping.csv`. The importer checks every row, rejects unknown targets
+and conflicting changes, and previews the first 20 rows without truncating the
+saved schedule. Uploading alone does not alter a run: enable the schedule and
+press **Save channel schedule** to write `channel_schedule.json`. Saving is
+blocked while a TwinDash deployment holds that run's lock.
+
+The manual table remains available. The panel includes a downloadable CSV
+header, the run's UE mapping and normalized CSV export. See the
+[channel CSV schema](docs/channel_schedule_csv.md) for field types, target groups,
+examples and timing rules. Bulk import does not change the current runner's
+sequential SSH replay behavior or provide high-frequency timing guarantees.
+
+## Offered load over time
+
+For a run with existing MGEN sender scripts, analysis notebooks can calculate
+projected UL/DL load in intervals:
+
+```python
+from twindash.mgen_script import projected_load_timeseries
+
+load = projected_load_timeseries(run_dir, interval_s=900)
+```
+
+The result contains `interval_start_s`, `interval_end_s`, `direction`,
+`offered_packets`, `offered_bytes`, and `offered_mbps`. The calculation integrates
+each PERIODIC UDP ON/OFF window over its overlap with each interval. It includes
+idle intervals and uses the actual length of a shorter final interval. The
+default endpoint is `config.json`'s `simulation_duration`; `start_s` and `end_s`
+can select a smaller window. Times here are relative to the MGEN run start.
+
+When `flow_batch_map.csv` carries session provenance, pass
+`group_by=("scenario_role", "session_id")` to retain it in the output. Missing or
+ambiguous grouping metadata is rejected. Unsupported sender events and
+unmatched ON/OFF events are rejected rather than silently omitted.
+
+Packet and byte values are rate-integrated projections and may be fractional.
+They are not observed packet counts or measured network capacity; SEND/RECV logs
+remain the source of actual transmission and delivery evidence. The existing
+whole-flow projection and Results/Dataset pages continue to use their current
+interfaces.
+
 ## Run-folder contract
 
 ```text

@@ -1,0 +1,11 @@
+session_id,experimental_ue,start_s,end_s,traffic_model,source_category,scenario_role,source_session_id,source_traffic_bytes,dataset_type
+demo_base_001,mobile_ue1,0,180,telegram,messaging,baseline,,100000,synthetic_test
+demo_base_002,mobile_ue2,30,210,telegram,messaging,baseline,,150000,synthetic_test
+demo_aug_001,mobile_ue1,60,120,telegram,messaging,augmented,demo_base_001,50000,synthetic_test
+demo_base_003,mobile_ue3,60,240,telegram,messaging,baseline,,200000,synthetic_test
+demo_base_004,mobile_ue4,90,270,telegram,messaging,baseline,,250000,synthetic_test
+demo_aug_002,mobile_ue3,120,210,telegram,messaging,augmented,demo_base_003,60000,synthetic_test
+demo_base_005,static_ue1,120,300,telegram,messaging,baseline,,300000,synthetic_test
+demo_base_006,static_ue2,150,330,telegram,messaging,baseline,,350000,synthetic_test
+demo_base_007,static_ue3,180,360,telegram,messaging,baseline,,400000,synthetic_test
+demo_aug_003,static_ue2,210,270,telegram,messaging,augmented,demo_base_006,70000,synthetic_test

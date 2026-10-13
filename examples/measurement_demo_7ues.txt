@@ -1,0 +1,7 @@
+mobile_ue1
+mobile_ue2
+mobile_ue3
+mobile_ue4
+static_ue1
+static_ue2
+static_ue3
